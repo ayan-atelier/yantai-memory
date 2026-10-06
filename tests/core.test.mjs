@@ -85,3 +85,82 @@ test('assistant result must match the memory version', () => {
   assert.equal(compact.level, 2);
   assert.equal(compact.keepRounds, 2);
 });
+
+test('structured causal fields and investigation threads remain optional and validate', () => {
+  const old = C.emptyMemory();
+  const delta = C.validateDelta({
+    events: [{ round: 1, time: '夜间', place: '车站', description: '发现一张票。',
+      eventId: 'e-1', kind: 'clue', importance: 'core', actors: ['甲'], action: '甲发现车票',
+      cause: '甲检查遗留物', result: '票面显示下一站', consequences: ['需要核实出票人'],
+      evidenceRefs: ['round-1'], dependsOn: [], item: null, tension: ['紧张'] }],
+    corrections: [], summary: '甲在车站发现车票，票面指向下一站，出票人未明。',
+    threads: { upsert: [{ id: 'new-case', kind: '案件', title: '车票来源', at: '夜间', people: '甲',
+      content: '确认车票是谁留下的', known: '票面指向下一站', unknown: '出票人', nextEvidence: '核对售票记录',
+      due: '下一次调查', status: '调查中', state: 'open', importance: 'core', lastTouchedRound: 1, relatedEventIds: ['e-1'] }], resolve: [] },
+  }, old, [1], 'batch');
+  assert.equal(delta.events[0].kind, 'clue');
+  assert.equal(delta.events[0].cause, '甲检查遗留物');
+  assert.equal(delta.threads.upsert[0].kind, '案件');
+  assert.equal(delta.threads.upsert[0].unknown, '出票人');
+});
+
+test('prompt projection hides resolved and background threads while keeping causal anchors', () => {
+  const memory = { through: 20, skipped: 0, summary: '主线摘要', director: null,
+    events: Array.from({ length: 20 }, (_, i) => ({ round: i + 1, eventId: `e-${i + 1}`, time: '未明', place: '未明', description: `事件${i + 1}`, kind: i === 0 ? 'discovery' : 'routine', importance: i === 0 ? 'core' : 'background', actors: [], action: '', cause: '', result: '', consequences: [], evidenceRefs: [], dependsOn: [], tension: ['平稳'] })),
+    threads: [
+      { id: 'active', kind: '案件', title: '开放案件', content: '调查', status: '调查中', state: 'open', importance: 'core', people: '甲', due: '未明', relatedEventIds: ['e-1'] },
+      { id: 'done', kind: '约定', title: '已完成约定', content: '历史', status: '已履行', state: 'resolved', importance: 'active', people: '甲', due: '—', relatedEventIds: [] },
+      { id: 'bg', kind: '任务', title: '背景任务', content: '背景', status: '暂存', state: 'dormant', importance: 'background', people: '甲', due: '—', relatedEventIds: [] },
+    ] };
+  const projected = C.projectForPrompt(memory, { recentEvents: 4, maxThreads: 4 });
+  assert.deepEqual(projected.threads.map(t => t.id), ['active']);
+  assert.ok(projected.events.some(row => row.eventId === 'e-1'));
+  assert.ok(projected.events.length <= 5);
+  const prompt = C.renderMemory(memory, false, 'off', { prompt: true, recentEvents: 4, maxThreads: 4 });
+  assert.match(prompt, /开放案件/);
+  assert.doesNotMatch(prompt, /已完成约定/);
+});
+
+test('legacy rows receive a stable fallback event id', () => {
+  const old = C.emptyMemory();
+  const delta = C.validateDelta({ events: [{ round: 1, time: '未明', place: '未明', description: '旧格式。', item: null, tension: ['平稳'] }], corrections: [], summary: '旧摘要', threads: { upsert: [], resolve: [] } }, old, [1]);
+  assert.equal(delta.events[0].eventId, 'legacy-round-1');
+  assert.equal(delta.events[0].kind, 'scene');
+});
+
+test('next整理请求 receives the bounded causal projection', () => {
+  const old = { through: 15, skipped: 0, summary: '主线摘要', director: null,
+    events: Array.from({ length: 15 }, (_, i) => ({ round: i + 1, eventId: `e-${i + 1}`, time: '未明', place: '未明', description: `旧事件${i + 1}`, kind: 'routine', importance: 'background', actors: [], action: '', cause: '', result: '', consequences: [], evidenceRefs: [], dependsOn: [], tension: ['平稳'] })),
+    threads: [{ id: 'old', kind: '约定', title: '已履行', content: '旧约定', status: '已履行', state: 'resolved', importance: 'active', people: '甲', due: '—', relatedEventIds: [] }] };
+  const messages = C.requestMessages('中性整理规则', old, [{ round: 16, messages: [] }], '');
+  const input = JSON.parse(messages[1].content);
+  assert.equal(input['上一版记忆'].events.length, 6);
+  assert.equal(input['上一版记忆'].threads.length, 0);
+  assert.equal(input['上一版记忆'].projection.archivedHidden, true);
+});
+
+test('migration assistant returns a reversible summary and thread patch without rewriting events', () => {
+  const memory = { through: 2, skipped: 0, summary: '旧摘要', director: null,
+    events: [{ round: 1, eventId: 'e-1', time: '未明', place: '车站', description: '发现车票。', kind: 'scene', importance: 'active', actors: [], action: '', cause: '', result: '', consequences: [], evidenceRefs: [], dependsOn: [], tension: ['平稳'] }],
+    threads: [{ id: 't-old', kind: '约定', title: '旧约定', content: '旧内容', status: '进行中', people: '甲', due: '未明' }] };
+  const messages = C.migrationMessages(memory, 50000);
+  assert.match(messages[0].content, /不改写或删除原始事件/);
+  const result = C.validateMigrationOutput(JSON.stringify({ summary: '按因果重写的摘要。', threads: { upsert: [{ id: 't-old', kind: '约定', title: '旧约定', at: '未明', people: '甲', content: '旧内容', due: '未明', status: '已履行', state: 'resolved', importance: 'background' }], resolve: [] } }), memory);
+  assert.equal(result.summary, '按因果重写的摘要。');
+  assert.equal(result.threads.upsert[0].state, 'resolved');
+  assert.equal(memory.events[0].description, '发现车票。');
+});
+
+test('a migration patch with no new rounds survives backup validation', () => {
+  const rounds = [{ signature: 'sig-1' }];
+  const state = C.emptyState('chat');
+  state.history.push({ id: 'b1', at: '', sources: ['sig-1'], prefix: 'prefix-1', note: '', delta: {
+    events: [{ round: 1, time: '未明', place: '未明', description: '旧事件。', item: null, tension: ['平稳'] }],
+    corrections: [], summary: '旧摘要', threads: { upsert: [], resolve: [] }, suggestions: [], director: null,
+  }});
+  const migration = C.makeBatch({ events: [], corrections: [], summary: '迁移后的摘要。', threads: { upsert: [], resolve: [] }, suggestions: [], director: null }, rounds, 1, '迁移');
+  state.history.push(migration);
+  const restored = C.validateState(state);
+  assert.equal(C.materialize(restored).through, 1);
+  assert.equal(C.materialize(restored).summary, '迁移后的摘要。');
+});

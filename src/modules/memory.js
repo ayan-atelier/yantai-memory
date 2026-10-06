@@ -99,6 +99,7 @@ export async function createMemory({ host, store, ui }) {
   const config = () => ({ ...MEMORY_DEFAULTS, ...store.get().memory, suggestions: false, stripCardMemory: true });
   let alive = true, generation = null, target = null, pane = 'chat', renderVersion = 0, memoryDirty = false;
   let assistantRunning = false, assistantAnswer = '';
+  let migrationRunning = false, migrationPreview = null, migrationKey = '';
   let needsSyncAfterPause = false;
   let statusText = '打开聊天后可启用。', statusKind = 'info', injectionText = '尚未检查下一次发送。';
   let allRows = false, draftSettings = null, draftPreset = null;
@@ -209,6 +210,41 @@ export async function createMemory({ host, store, ui }) {
     });
     report('已撤销压缩，恢复完整记忆视图。', 'success');
   }
+  async function runAssistantMigration() {
+    if (migrationRunning || assistantRunning) throw new Error('小助手正在处理另一项请求，请等它完成。');
+    if (engine.running || generation) throw new Error('主回复或记忆整理仍在进行，请等它结束后再迁移。');
+    const fresh = await getView();
+    if (!fresh?.state.enabled) throw new Error('请先打开当前聊天的记忆。');
+    if (!fresh.memory.through) throw new Error('还没有可迁移的记忆。');
+    migrationRunning = true;
+    try {
+      const cfg = config();
+      report('小助手正在分析旧档案，生成迁移预览…');
+      const payload = await api.payload(cfg, C.migrationMessages(fresh.memory, Math.min(cfg.maxInputChars, 180000)));
+      const answer = await api.request(payload, new AbortController().signal, cfg.timeoutSeconds);
+      migrationPreview = C.validateMigrationOutput(answer, fresh.memory);
+      migrationKey = `${fresh.chat.key}:${fresh.state.revision}`;
+      report('迁移预览已生成。原记忆没有改动，请先检查摘要和开放线程。', 'success');
+      await refresh();
+      return migrationPreview;
+    } finally { migrationRunning = false; }
+  }
+  async function applyMigrationPreview() {
+    const fresh = await getView();
+    if (!fresh || !migrationPreview || migrationKey !== `${fresh.chat.key}:${fresh.state.revision}`) throw new Error('迁移预览已经过期，请重新生成。');
+    if (!await ui.confirm('应用这份迁移预览？原始事件不会删除，但会新增一条可撤销的主线摘要和线程修订记录。', { title: '确认应用迁移', confirmLabel: '应用迁移' })) return;
+    await engine.serial(async () => {
+      const current = await storage.load(fresh.chat);
+      if (current.state.revision !== fresh.state.revision) throw new Error('记忆在预览期间发生变化，未应用迁移。');
+      const delta = { events: [], corrections: [], summary: migrationPreview.summary, threads: migrationPreview.threads,
+        suggestions: [], director: fresh.memory.director || null, directorError: '' };
+      const batch = C.makeBatch(delta, fresh.rounds, fresh.memory.through, '因果模型迁移预览');
+      await storage.save(fresh.chat, { ...current.state, history: [...current.state.history, batch], compact: null }, current, () => capture()?.key === fresh.chat.key);
+    });
+    migrationPreview = null; migrationKey = '';
+    report('迁移已应用。原始逐轮事件仍保留，可以导出或回退。', 'success');
+    await refresh();
+  }
   async function askAssistant(question, context = '') {
     const text = String(question || '').trim();
     if (!text) throw new Error('先写下你想问小助手的问题。');
@@ -232,6 +268,7 @@ export async function createMemory({ host, store, ui }) {
       await storage.save(captured, { ...imported, owner: captured.key, enabled: loaded.owned && loaded.state.enabled,
         pausedByUser: false, lastError: '' }, { ...fresh, removeLegacy: legacy }, () => capture()?.key === captured.key);
     });
+    migrationPreview = null; migrationKey = '';
     report('记忆已读入，没有发起模型请求。确认内容后可开启当前聊天的记忆。', 'success');
     await refresh();
   }
@@ -308,13 +345,22 @@ export async function createMemory({ host, store, ui }) {
       box.append(board);
     }
     const overview = section('累计关键经过'); overview.append(node('p', mem.summary, 'yt-memory-prose')); box.append(overview);
-    const threads = section('尚未完成、约定与誓言', '已完成的普通待办会移出；约定与誓言一直保留，更新履行、失约或解除状态。');
-    threads.append(mem.threads.length ? readableTable(['记录时间', '类型', '涉及人物', '内容 / 原话', '期限 / 条件', '状态'], mem.threads.map(t => [t.at, t.kind, t.people, t.content, t.due, t.status])) : node('p', '暂无。', 'yt-muted'));
-    box.append(threads);
-    const ledger = section('逐轮记录', '全部历史始终保留。这里可以只查看最近的记录，不影响发送给主模型的内容。');
+    const projection = C.projectForPrompt(mem, { recentEvents: 12, maxThreads: 20 });
+    const activeIds = new Set(projection.threads.map(t => t.id));
+    const activeThreads = section('当前开放线程', '只显示仍会影响下一轮的任务、案件、线索、悬念和有效约定；已结案内容仍保存在本地档案。');
+    activeThreads.append(projection.threads.length ? readableTable(['类型', '标题', '已知 / 内容', '未知 / 下一证据', '状态'], projection.threads.map(t => [t.kind, t.title, t.known || t.content, t.unknown || t.nextEvidence || '未明', t.state || t.status])) : node('p', '暂无。', 'yt-muted'));
+    box.append(activeThreads);
+    const archivedThreads = mem.threads.filter(t => !activeIds.has(t.id));
+    if (archivedThreads.length) {
+      const details = node('details', undefined, 'yt-memory-advanced');
+      details.append(node('summary', `已结案或背景事项（${archivedThreads.length} 条）`));
+      details.append(readableTable(['记录时间', '类型', '标题', '结果 / 状态'], archivedThreads.map(t => [t.at, t.kind, t.title || t.content, t.status])));
+      box.append(details);
+    }
+    const ledger = section('因果事件记录', '默认只看最近记录；每条事件优先显示行动、原因、结果和后果。完整历史始终保留，不会因为折叠而删除。');
     const rows = allRows ? mem.events : mem.events.slice(-12);
     if (mem.events.length > 12) ledger.append(button(allRows ? '只看最近 12 轮' : `查看全部 ${mem.events.length} 轮`, action(async () => { allRows = !allRows; await refresh(); })));
-    ledger.append(readableTable(['轮次', '时间', '地点', '简略描述', '重要物品', '原因', '情绪张力'], rows.map(r => [r.round, r.time, r.place, r.description, r.item?.name || '无新增', r.item?.reason || '—', r.tension.join(' → ')])));
+    ledger.append(readableTable(['轮次', '时间', '地点', '事件', '原因', '结果 / 后果'], rows.map(r => [r.round, r.time, r.place, r.action || r.description, r.cause || '未明', [r.result, ...(r.consequences || [])].filter(Boolean).join('；') || '未明'])));
     box.append(ledger);
   }
   function renderAssistant(box, view) {
@@ -444,7 +490,7 @@ export async function createMemory({ host, store, ui }) {
     })));
     backups.append(button('导出可读记忆', action(async () => {
       const fresh = await getView(); if (!fresh) return;
-      host.download('yantai-memory.txt', C.renderMemory(fresh.memory, false, config().directorMode) || '尚无记忆记录。');
+      host.download('yantai-memory.txt', C.renderMemory(fresh.memory, false, config().directorMode, { includeArchived: true }) || '尚无记忆记录。');
     })));
     backups.append(upload('导入记忆备份', '.json,application/json', async file => {
       if (file.size > 20000000) throw new Error('备份超过 20 MB，暂不导入。');
@@ -453,6 +499,17 @@ export async function createMemory({ host, store, ui }) {
       if (!await ui.confirm('用这份备份替换本聊天的记忆？聊天正文不会改变。', { title: '导入记忆备份', confirmLabel: '导入' })) return;
       await restoreState(imported, fresh.chat, fresh.loaded, fresh.loaded.legacy);
     }));
+    backups.append(button('小助手整理旧档案 · 预览', action(async () => { await runAssistantMigration(); })));
+    const currentForMigration = capture();
+    if (migrationPreview && currentForMigration && migrationKey.startsWith(`${currentForMigration.key}:`)) {
+      const preview = section('迁移预览', '只会更新摘要和开放线程，不会删除原始逐轮事件。确认前可以直接放弃。');
+      preview.append(node('p', migrationPreview.summary, 'yt-memory-prose'));
+      preview.append(node('p', `准备更新 ${migrationPreview.threads.upsert.length} 条线程，解除 ${migrationPreview.threads.resolve.length} 条普通事项。`, 'yt-muted'));
+      const previewActions = node('div', undefined, 'yt-inline');
+      previewActions.append(button('应用迁移预览', action(async () => { await applyMigrationPreview(); }), true));
+      previewActions.append(button('放弃预览', action(async () => { migrationPreview = null; migrationKey = ''; report('已放弃迁移预览。'); await refresh(); })));
+      preview.append(previewActions); data.append(preview);
+    }
     const currentChat = capture();
     if (currentChat && storage.confirmed.get(currentChat.key)?.legacy) backups.append(button('读取旧版记忆', action(async () => {
       const fresh = await getView(); if (!fresh) return;
@@ -557,6 +614,7 @@ export async function createMemory({ host, store, ui }) {
   cleanups.push(host.on('CHAT_CHANGED', () => {
     memoryDirty = true;
     assistantAnswer = '';
+    migrationPreview = null; migrationKey = '';
     historyPlan = null;
     gate.cancelScheduled(); generation = null;
     if (gate.paused()) { needsSyncAfterPause = true; return; }
