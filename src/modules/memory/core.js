@@ -4,7 +4,7 @@ const JDMCore = (() => {
   'use strict';
   // Development line only. The daily install remains manifest 0.3.0 and is
   // the version accepted by archive-sync 0.1.4.
-  const VERSION = '0.3.1-dev';
+  const VERSION = '0.3.2-dev';
   const TENSIONS = ['平稳', '轻松', '紧张', '焦灼', '冲突', '缓和', '未明'];
   // 0.3.0 backups only used the first three kinds. The additional kinds are
   // optional and let investigation / event-driven stories keep their open

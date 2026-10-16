@@ -10,6 +10,7 @@ import { DIRECTOR_MODES, DIRECTOR_STRENGTHS, DIRECTOR_MODE_LABELS } from './memo
 export const MEMORY_DEFAULTS = Object.freeze({ apiMode: 'main', apiUrl: '', model: '', temperature: 0.25,
   maxTokens: 8192, frequency: 1, batchSize: 10, timeoutSeconds: 180, maxInputChars: 240000,
   depth: 4, historyRounds: 3, suggestions: false, stripCardMemory: true, extraBody: '{}', preset: DEFAULT_PRESET,
+  autoEnableNewChats: true,
   assistantAutoCompress: false, assistantWarnTokens: 16000, assistantAutoTokens: 20000, assistantTargetTokens: 10000,
   directorMode: 'off', directorStrength: 'standard', directorRules: '' });
 const fields = { frequency: ['每几轮自动整理一次', 1, 100], batchSize: ['每次最多整理几轮', 1, 100],
@@ -101,7 +102,7 @@ export async function createMemory({ host, store, ui }) {
   let assistantRunning = false, assistantAnswer = '';
   let migrationRunning = false, migrationPreview = null, migrationKey = '';
   let needsSyncAfterPause = false;
-  let statusText = '打开聊天后可启用。', statusKind = 'info', injectionText = '尚未检查下一次发送。';
+  let statusText = '打开新聊天后会自动启用记忆。', statusKind = 'info', injectionText = '尚未检查下一次发送。';
   let allRows = false, draftSettings = null, draftPreset = null;
   let historyPlan = null;
   const noteDrafts = new Map(), cleanups = [];
@@ -284,7 +285,7 @@ export async function createMemory({ host, store, ui }) {
   function renderChat(box, view) {
     const intro = section('把经过记清，把故事留给你。', '主回复完成后整理一次。记忆放在本聊天世界书里，下一轮随剧情一起发送。');
     if (!view) {
-      intro.append(node('p', host.currentChat()?.isGroup ? '当前版本先支持单角色聊天。请打开一个角色存档。' : '先打开一个角色聊天，再为这份存档开启记忆。', 'yt-empty'));
+      intro.append(node('p', host.currentChat()?.isGroup ? '当前版本先支持单角色聊天。请打开一个角色存档。' : '先打开一个角色聊天。没有绑定世界书、还没有完成一轮对话的新聊天会按设置自动启用记忆。', 'yt-empty'));
       box.append(intro); return;
     }
     const { chat, loaded, state, memory, rounds } = view;
@@ -299,6 +300,7 @@ export async function createMemory({ host, store, ui }) {
       } catch (error) { checkbox.checked = state.enabled; throw error; }
     }));
     intro.append(enabled.wrap, node('p', '同一聊天请只启用一套记忆系统。砚台不会替你关闭其他插件或世界书条目。', 'yt-muted'));
+    if (loaded.autoEnabled) intro.append(node('p', '这是一个尚未绑定世界书、还没有完成一轮对话的新聊天，已按设置自动启用。第一次主回复完成后会自动整理这一轮并建立独立的记忆世界书；你可以随时关闭。', 'yt-notice'));
     if (loaded.fork) intro.append(node('p', '这是分支副本，记忆默认暂停。启用时会为此分支独立保存。', 'yt-notice'));
     if (loaded.legacy) intro.append(node('p', '发现旧版静读记忆。新版本尚未读取或接管它。', 'yt-notice'));
     const stats = node('div', undefined, 'yt-memory-stats');
@@ -317,7 +319,7 @@ export async function createMemory({ host, store, ui }) {
     intro.append(node('p', `每 ${config().frequency} 轮自动整理，单次最多 ${config().batchSize} 轮。有积压时从最早未整理的一轮接着补，每次只发一次请求。当前导演控制台：${modeLabel}。`, 'yt-muted'));
     if (state.pausedByUser) intro.append(node('p', '你已停止自动整理，点击“立即整理”成功后恢复。', 'yt-notice'));
     else if (state.lastError) intro.append(node('p', `上次整理未成功：${state.lastError}。${state.enabled ? '下一轮主回复完成后会再次尝试，也可点击“立即整理”。' : '当前聊天记忆已关闭，重新启用后可继续整理。'}`, 'yt-notice'));
-    intro.append(node('p', loaded.book ? `聊天世界书：${loaded.book}` : '首次启用时建立独立的聊天世界书。', 'yt-muted'));
+    intro.append(node('p', loaded.book ? `聊天世界书：${loaded.book}` : '首次主回复完成后建立独立的聊天世界书。', 'yt-muted'));
     intro.append(node('p', '无需手动打开这两个世界书条目，也无需全局启用。记录可在“查看记忆”中阅读，生成时砚台会自动发送正文；内部备份不发送。', 'yt-muted'));
     intro.append(node('p', '番外隔离：以 `$` 开头并明确写出 IF／番外／外传／小剧场或“暂停当前剧情”的独立拍摄，会留在聊天记录中，但不进入主线记忆。', 'yt-muted'));
     intro.append(node('p', injectionText, 'yt-muted yt-memory-injection'));
@@ -422,6 +424,11 @@ export async function createMemory({ host, store, ui }) {
     }
     custom.append(node('p', '密钥仅保存在当前浏览器。换设备需重新填写，导出预设与备份不会带上它。', 'yt-muted'));
     form.append(custom);
+    const autoEnable = toggle('新聊天默认启用记忆', current.autoEnableNewChats !== false, () => {
+      draftSettings = { ...(draftSettings || {}), autoEnableNewChats: autoEnable.input.checked };
+    });
+    controls.autoEnableNewChats = autoEnable.input;
+    form.append(autoEnable.wrap, node('p', '只作用于还没有完成一轮对话、没有砚台记忆、也没有绑定世界书的新聊天。已有记忆、分支副本和已绑定普通世界书的聊天仍需手动确认，避免跨存档混用。', 'yt-muted'));
     select.addEventListener('change', () => {
       draftSettings = { ...(draftSettings || {}), apiMode: select.value };
       custom.hidden = select.value !== 'custom'; mainInfo.hidden = select.value !== 'main';
@@ -465,6 +472,7 @@ export async function createMemory({ host, store, ui }) {
       const next = { ...config(), apiMode: select.value };
       for (const key of ['apiUrl', 'model', 'extraBody']) next[key] = controls[key].value.trim();
       for (const key of Object.keys(fields)) next[key] = controls[key].value;
+      next.autoEnableNewChats = controls.autoEnableNewChats.checked;
       next.assistantAutoCompress = controls.assistantAutoCompress.checked;
       next.directorMode = directorMode.value;
       next.directorStrength = strength.value;

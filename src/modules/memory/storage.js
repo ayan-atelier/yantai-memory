@@ -2,6 +2,9 @@
 import C from './core.js';
 export const TAG = 'yantai_narrative_memory_v1';
 export const LEGACY_TAG = 'jingdu_narrative_memory_v1';
+// A chat-level opt-out lets a user turn off the default for a brand-new chat
+// without creating an empty worldbook just to persist one checkbox click.
+export const AUTO_ENABLE_OPT_OUT = 'yantai_memory_auto_enable_opt_out';
 export const tagOf = entry => entry?.extra?.[TAG];
 export const legacyTagOf = entry => entry?.extra?.[LEGACY_TAG];
 export function parseState(data, legacy = false) {
@@ -47,6 +50,23 @@ export function createStorage(host, configuration, runtime = {}) {
   const consent = new Set();
   let bridgePromise;
   const current = () => runtime.context ? runtime.context() : host.currentChat();
+  const chatMetadata = chat => chat?.context?.chatMetadata || chat?.metadata || null;
+  async function setAutoEnableOptOut(captured, value, guard = () => true) {
+    check(captured, guard);
+    const active = current();
+    const metadata = chatMetadata(active);
+    if (!metadata || typeof metadata !== 'object') throw new Error('当前酒馆没有提供聊天元数据，无法保存默认记忆开关。');
+    if (value) metadata[AUTO_ENABLE_OPT_OUT] = true;
+    else delete metadata[AUTO_ENABLE_OPT_OUT];
+    await host.saveMetadata();
+    check(captured, guard);
+    const savedChat = await host.request('/api/chats/get', { body: {
+      ch_name: captured.name, file_name: captured.id, avatar_url: captured.avatar }, cache: 'no-cache' });
+    const savedMetadata = Array.isArray(savedChat) ? savedChat[0]?.chat_metadata : null;
+    if (!savedMetadata || (value ? savedMetadata[AUTO_ENABLE_OPT_OUT] !== true : savedMetadata[AUTO_ENABLE_OPT_OUT] === true)) {
+      throw new Error('聊天默认记忆开关尚未保存成功，请稍后重试。');
+    }
+  }
   const nativeBridge = async () => {
     if (runtime.cacheBridge) return runtime.cacheBridge;
     bridgePromise ||= import('/scripts/world-info.js');
@@ -71,9 +91,14 @@ export function createStorage(host, configuration, runtime = {}) {
     check(captured);
     const stored = parseState(data);
     const fork = !!stored && stored.owner !== captured.key;
-    const state = stored ? { ...stored, owner: captured.key, enabled: fork ? false : stored.enabled } : C.emptyState(captured.key);
+    const metadata = chatMetadata(captured);
+    const autoDisabled = metadata?.[AUTO_ENABLE_OPT_OUT] === true;
+    const freshChat = C.roundsFrom(captured.messages || [], true).length === 0;
+    const autoEnabled = !stored && !book && !autoDisabled && freshChat && configuration().autoEnableNewChats !== false;
+    const state = stored ? { ...stored, owner: captured.key, enabled: fork ? false : stored.enabled }
+      : { ...C.emptyState(captured.key), enabled: autoEnabled };
     const result = { book, data, state, fork, originalRevision: stored?.revision || '',
-      owned: !!stored && !fork, legacy: Object.values(data.entries).some(legacyTagOf) };
+      owned: !!stored && !fork, legacy: Object.values(data.entries).some(legacyTagOf), autoEnabled, autoDisabled };
     confirmed.set(captured.key, result);
     return result;
   }
@@ -85,7 +110,10 @@ export function createStorage(host, configuration, runtime = {}) {
     };
     ensureCurrent();
     const needsNew = !loaded.owned;
-    if (needsNew && !nextState.enabled && !nextState.history.length && !nextState.note) return nextState;
+    if (needsNew && !nextState.enabled && !nextState.history.length && !nextState.note) {
+      if (loaded.autoEnabled || loaded.autoDisabled) await setAutoEnableOptOut(captured, true, guard);
+      return nextState;
+    }
     if (needsNew && loaded.book && !consent.has(captured.key)) throw new Error('请先在记忆面板确认建立本聊天的独立世界书。');
     const bridge = await nativeBridge();
     ensureCurrent();
@@ -117,7 +145,9 @@ export function createStorage(host, configuration, runtime = {}) {
       const metadata = active.metadata || active.context?.chatMetadata;
       if (!metadata) throw new Error('当前酒馆缺少聊天元数据，世界书已保存但未绑定。');
       const prior = metadata.world_info;
+      const priorAutoOptOut = metadata[AUTO_ENABLE_OPT_OUT];
       metadata.world_info = book;
+      if (nextState.enabled) delete metadata[AUTO_ENABLE_OPT_OUT];
       expectedBinding = book;
       try {
         await host.saveMetadata();
@@ -129,6 +159,7 @@ export function createStorage(host, configuration, runtime = {}) {
       } catch (error) {
         if (current()?.key === captured.key && metadata.world_info === book) {
           if (prior === undefined) delete metadata.world_info; else metadata.world_info = prior;
+          if (priorAutoOptOut === undefined) delete metadata[AUTO_ENABLE_OPT_OUT]; else metadata[AUTO_ENABLE_OPT_OUT] = priorAutoOptOut;
         }
         throw error;
       }
