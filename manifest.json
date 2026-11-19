@@ -1,14 +1,15 @@
 {
-  "display_name": "砚台 · 叙事记忆（因果模型开发版）",
+  "display_name": "砚台 · 叙事记忆",
   "loading_order": 100,
   "requires": [],
   "optional": [],
   "js": "index.js",
   "css": "style.css",
-  "author": "阿砚 × 泊舟（Codex）",
-  "version": "0.3.1-dev",
-  "minimum_client_version": "1.16.0",
-  "auto_update": false,
+  "author": "阿砚",
+  "version": "0.4.0",
+  "minimum_client_version": "1.13.0",
+  "auto_update": true,
+  "homePage": "https://github.com/ayan-atelier/yantai-memory",
   "hooks": {
     "enable": "onEnable",
     "disable": "onDisable"

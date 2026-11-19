@@ -1,50 +1,181 @@
 .yt-plugin-dialog {
- --yt-bg:var(--SmartThemeBlurTintColor,#202224); --yt-panel:rgba(127,127,127,.07);
- --yt-text:var(--SmartThemeBodyColor,#ece8e0); --yt-muted:var(--SmartThemeEmColor,#afa99f);
- --yt-accent:var(--SmartThemeQuoteColor,#c8b994); --yt-accent-soft:rgba(170,150,110,.13);
- --yt-line:var(--SmartThemeBorderColor,rgba(170,170,170,.24)); --yt-radius:12px;
- --yt-serif:inherit; --yt-font:var(--mainFontFamily,inherit);
- color:var(--yt-text); background:var(--yt-bg); font:inherit; font-family:var(--yt-font);
- border:1px solid var(--yt-line); border-radius:16px; padding:0;
- width:min(900px,calc(100vw - 24px)); max-width:calc(100vw - 24px);
- max-height:calc(100vh - 32px); max-height:calc(100dvh - 32px); margin:auto;
- box-shadow:0 16px 64px #0005; backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
- overflow:hidden; text-align:left;
+  --yt-bg: var(--SmartThemeBlurTintColor, rgba(24, 24, 28, 0.95));
+  --yt-panel: var(--SmartThemeChatTintColor, rgba(128, 128, 128, 0.08));
+  --yt-text: var(--SmartThemeBodyColor, #ece8df);
+  --yt-muted: color-mix(in srgb, var(--yt-text) 58%, transparent);
+  --yt-accent: var(--SmartThemeUnderlineColor, var(--SmartThemeQuoteColor, #d4b98c));
+  --yt-accent-soft: color-mix(in srgb, var(--yt-accent) 14%, transparent);
+  --yt-line: var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.13));
+  --yt-radius: 7px;
+  --yt-font: var(--mainFontFamily, inherit);
+  color: var(--yt-text);
+  background: var(--yt-bg);
+  font: inherit;
+  font-family: var(--yt-font);
+  border: 1px solid var(--yt-line);
+  border-top: 2px solid var(--yt-accent);
+  border-radius: 10px;
+  padding: 0;
+  width: min(860px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  margin: auto;
+  box-shadow: 0 18px 54px rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  overflow: hidden;
+  text-align: left;
 }
-.yt-plugin-dialog[open] { display:flex; flex-direction:column; }
-.yt-plugin-dialog::backdrop { background:rgba(0,0,0,.5); }
-.yt-plugin-header { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:20px 24px; border-bottom:1px solid var(--yt-line); flex:none; }
-.yt-plugin-header small { color:var(--yt-muted); font-size:12px; letter-spacing:.06em; }
-.yt-plugin-header h2 { margin:4px 0 0; color:inherit; font-size:1.35em; }
-.yt-plugin-content { padding:22px 24px; overflow:auto; min-height:0; overscroll-behavior:contain; scrollbar-gutter:stable; }
-.yt-plugin-dialog * { box-sizing:border-box; }
-.yt-plugin-dialog p { line-height:1.65; }
-.yt-plugin-dialog .yt-button,.yt-plugin-settings .yt-button { font:inherit; color:inherit; background:transparent; border:1px solid var(--yt-line,var(--SmartThemeBorderColor,#7775)); border-radius:8px; min-height:44px; padding:9px 14px; cursor:pointer; margin:0; }
-.yt-plugin-dialog .yt-button:hover { background:var(--yt-panel); }
-.yt-plugin-dialog .yt-button:disabled { opacity:.55; cursor:not-allowed; }
-.yt-plugin-dialog .yt-button-primary { border-color:var(--yt-accent); background:var(--yt-accent-soft); }
-.yt-plugin-dialog .yt-plugin-close { min-width:44px; font-size:24px; line-height:1; padding:8px; }
-.yt-plugin-dialog .yt-muted { color:var(--yt-muted); font-size:.9em; }
-.yt-plugin-dialog .yt-notice { padding:12px 14px; border:1px solid var(--yt-line); border-radius:var(--yt-radius); background:var(--yt-panel); }
-.yt-plugin-dialog .yt-section { margin:0 0 22px; padding-bottom:18px; border-bottom:1px solid var(--yt-line); }
-.yt-plugin-dialog .yt-section-title { font-size:1.06em; margin:0 0 10px; }
-.yt-plugin-dialog .yt-inline { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
-.yt-plugin-dialog .yt-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
-.yt-plugin-dialog .yt-field { display:flex; flex-direction:column; gap:7px; margin:12px 0; min-width:0; }
-.yt-plugin-dialog .yt-input,.yt-plugin-dialog .yt-select,.yt-plugin-dialog .yt-textarea { font:inherit; color:var(--yt-text); background:var(--yt-panel); border:1px solid var(--yt-line); border-radius:8px; min-height:44px; padding:10px; width:100%; min-width:0; margin:0; }
-.yt-plugin-dialog .yt-textarea { resize:vertical; }
-.yt-plugin-dialog .yt-toggle-row { display:flex; gap:12px; align-items:center; min-height:48px; cursor:pointer; }
-.yt-plugin-dialog input[type=checkbox] { accent-color:var(--yt-accent); flex:none; width:18px; height:18px; margin:0; }
-.yt-plugin-dialog .yt-empty { padding:20px 0; }
-.yt-plugin-confirm { max-width:480px; }
-.yt-plugin-dialog :focus-visible,.yt-native-entry:focus-visible { outline:2px solid var(--yt-accent,var(--SmartThemeQuoteColor,#c8b994)); outline-offset:2px; }
-/* Menu anchors and extension drawers inherit native layout, color and opacity. */
-.yt-plugin-settings .inline-drawer-content { padding-top:8px; }
-@media(max-width:600px) {
- .yt-plugin-dialog { width:calc(100vw - 16px); max-width:calc(100vw - 16px); max-height:calc(100dvh - 20px); border-radius:12px; }
- .yt-plugin-header { padding:14px 16px; }
- .yt-plugin-content { padding:16px; }
- .yt-plugin-dialog .yt-grid { grid-template-columns:1fr; gap:4px; }
- .yt-plugin-dialog .yt-inline>.yt-button { flex:1 1 auto; }
- .yt-plugin-dialog .yt-input,.yt-plugin-dialog .yt-select,.yt-plugin-dialog .yt-textarea { font-size:16px; }
+.yt-plugin-dialog[open] { display: flex; flex-direction: column; }
+.yt-plugin-dialog::backdrop { background: rgba(0, 0, 0, 0.48); }
+.yt-plugin-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--yt-line);
+  flex: none;
+}
+.yt-plugin-header small {
+  color: var(--yt-muted);
+  font-size: 11.5px;
+  letter-spacing: 0.05em;
+}
+.yt-plugin-header h2 {
+  margin: 2px 0 0;
+  color: inherit;
+  font-size: 1.16em;
+  font-weight: 600;
+}
+.yt-plugin-content {
+  padding: 16px 20px 20px;
+  overflow: auto;
+  min-height: 0;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--yt-line) transparent;
+}
+.yt-plugin-content::-webkit-scrollbar { width: 5px; height: 5px; }
+.yt-plugin-content::-webkit-scrollbar-track { background: transparent; }
+.yt-plugin-content::-webkit-scrollbar-thumb { background: var(--yt-line); border-radius: 999px; }
+.yt-plugin-dialog * { box-sizing: border-box; }
+.yt-plugin-dialog p { line-height: 1.6; margin: 6px 0; }
+.yt-plugin-dialog .yt-button,
+.yt-plugin-settings .yt-button {
+  font: inherit;
+  font-size: 13px;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--yt-line);
+  border-radius: var(--yt-radius);
+  min-height: 34px;
+  padding: 6px 12px;
+  cursor: pointer;
+  margin: 0;
+  transition: background-color 0.14s ease, border-color 0.14s ease;
+}
+.yt-plugin-dialog .yt-button:hover { background: var(--yt-panel); }
+.yt-plugin-dialog .yt-button:disabled { opacity: 0.5; cursor: not-allowed; }
+.yt-plugin-dialog .yt-button-primary {
+  border-color: var(--yt-accent);
+  background: var(--yt-accent-soft);
+  color: var(--yt-text);
+  font-weight: 500;
+}
+.yt-plugin-dialog .yt-plugin-close {
+  min-width: 34px;
+  min-height: 34px;
+  font-size: 20px;
+  line-height: 1;
+  padding: 4px 8px;
+}
+.yt-plugin-dialog .yt-muted { color: var(--yt-muted); font-size: 12px; }
+.yt-plugin-dialog .yt-notice {
+  padding: 9px 12px;
+  border: 1px solid var(--yt-line);
+  border-radius: var(--yt-radius);
+  background: var(--yt-panel);
+  font-size: 12.5px;
+}
+.yt-plugin-dialog .yt-section {
+  margin: 0 0 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--yt-line);
+}
+.yt-plugin-dialog .yt-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.yt-plugin-dialog .yt-section-title { font-size: 13.5px; font-weight: 600; margin: 0; }
+.yt-plugin-dialog .yt-section-hint { font-size: 11.5px; color: var(--yt-muted); }
+.yt-plugin-dialog .yt-inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.yt-plugin-dialog .yt-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }
+.yt-plugin-dialog .yt-field { display: flex; flex-direction: column; gap: 5px; margin: 8px 0; min-width: 0; }
+.yt-plugin-dialog .yt-field-label { font-size: 12px; color: var(--yt-muted); }
+.yt-plugin-dialog .yt-input,
+.yt-plugin-dialog .yt-select,
+.yt-plugin-dialog .yt-textarea {
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--yt-text);
+  background: var(--yt-panel);
+  border: 1px solid var(--yt-line);
+  border-radius: var(--yt-radius);
+  min-height: 36px;
+  padding: 7px 10px;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+}
+.yt-plugin-dialog .yt-textarea {
+  resize: vertical;
+  scrollbar-width: thin;
+  scrollbar-color: var(--yt-line) transparent;
+}
+.yt-plugin-dialog .yt-toggle-row {
+  display: inline-flex;
+  gap: 9px;
+  align-items: center;
+  min-height: 36px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.yt-plugin-dialog input[type="checkbox"] {
+  accent-color: var(--yt-accent);
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+.yt-plugin-dialog .yt-empty { padding: 14px 0; color: var(--yt-muted); font-size: 13px; }
+.yt-plugin-confirm { max-width: 440px; }
+.yt-plugin-dialog :focus-visible,
+.yt-native-entry:focus-visible {
+  outline: 2px solid var(--yt-accent);
+  outline-offset: 2px;
+}
+.yt-plugin-settings .inline-drawer-content { padding-top: 8px; }
+
+@media (max-width: 768px) {
+  .yt-plugin-dialog {
+    width: calc(100vw - 12px);
+    max-width: calc(100vw - 12px);
+    max-height: calc(100dvh - 16px);
+    border-radius: 10px;
+  }
+  .yt-plugin-header { padding: 12px 14px; }
+  .yt-plugin-content { padding: 14px; }
+  .yt-plugin-dialog .yt-grid { grid-template-columns: 1fr; gap: 4px; }
+  .yt-plugin-dialog .yt-inline > .yt-button { flex: 1 1 auto; }
+  .yt-plugin-dialog .yt-input,
+  .yt-plugin-dialog .yt-select,
+  .yt-plugin-dialog .yt-textarea {
+    font-size: 16px;
+  }
 }
