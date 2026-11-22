@@ -278,3 +278,85 @@ test('legacy 0.3.x saves with director.scene load cleanly and transition smoothl
   assert.match(rendered, /旧信物/);
   assert.doesNotMatch(rendered, /导演运行台|大事推进器/);
 });
+
+test('roundsFrom preserves /hide hidden user & character messages while skipping genuine non-story system cards', () => {
+  const messages = [
+    { mes: '欢迎来到酒馆', is_user: false, is_system: true, name: 'System', force_avatar: 'img/five.png', extra: { uses_system_ui: true } },
+    { mes: '第0楼开场白（未隐藏）', is_user: false, is_system: false, name: '许今闻' },
+    { mes: '第1轮玩家输入（已被 /hide 隐藏）', is_user: true, is_system: true, name: '清砚' },
+    { mes: '场外备注卡片', is_user: false, is_system: true, name: 'Note', extra: { type: 'comment' } },
+    { mes: '第1轮角色回复（已被 /hide 隐藏）', is_user: false, is_system: true, name: '许今闻' },
+    { mes: '工具调用回显', is_user: false, is_system: true, name: 'System', extra: { isSmallSys: true, tool_invocations: [{}] } },
+    { mes: '第2轮玩家输入（可见）', is_user: true, is_system: false, name: '清砚' },
+    { mes: '第2轮角色回复（可见）', is_user: false, is_system: false, name: '许今闻' },
+  ];
+
+  const rounds = C.roundsFrom(messages);
+  assert.equal(rounds.length, 2, 'Hidden dialogue floors must still form 2 complete story rounds');
+  assert.equal(rounds[0].messages.length, 3, 'Round 1 includes greeting + hidden user + hidden assistant');
+  assert.match(rounds[0].messages[1].text, /第1轮玩家输入/);
+  assert.match(rounds[0].messages[2].text, /第1轮角色回复/);
+
+  // Toggling /hide <-> /unhide MUST NOT alter round signatures at all!
+  const unhidden = messages.map((m, idx) => (idx === 2 || idx === 4 ? { ...m, is_system: false } : m));
+  const roundsAfterUnhide = C.roundsFrom(unhidden);
+  assert.deepEqual(
+    rounds.map(r => r.signature),
+    roundsAfterUnhide.map(r => r.signature),
+    '/hide and /unhide must never change round signatures',
+  );
+});
+
+test('smartReconcile protects worldbook memory across typo edits, partial batch trims, and large deletions + vault restore', () => {
+  const raw = [{ mes: '开场白A', is_user: false, name: '许今闻', is_system: false }];
+  for (let r = 1; r <= 10; r++) {
+    raw.push(msg(`玩家第${r}轮`, true, '清砚'), msg(`角色第${r}轮`, false, '许今闻'));
+  }
+  const rounds10 = C.roundsFrom(raw);
+  const state = C.emptyState('chat-guard');
+  state.enabled = true;
+
+  // Single 10-round batch (simulating user summarizing Rounds 1-10 in one shot)
+  const delta10 = C.validateDelta({
+    events: rounds10.map(r => ({ round: r.round, description: `第${r.round}轮事件归档记录。` })),
+    chapterTitle: '初遇十轮',
+    chapterSummary: '第1至10轮完整主线纪要。',
+    threads: { upsert: [{ id: 'v1', kind: '约定', title: '周末看展', content: '约定周六看画展' }], resolve: [] },
+  }, C.emptyMemory(), rounds10.map(r => r.round), 'batch-10');
+  state.history.push(C.makeBatch(delta10, rounds10, 0));
+
+  // Case 1: Editing a typo in Round 2 or greeting MUST NOT lose any of the 10 rounds!
+  const typoRaw = structuredClone(raw);
+  typoRaw[0].mes = '开场白A（修正错别字）';
+  typoRaw[3].mes = '玩家第2轮（修了一个标点！）';
+  const typoRounds = C.roundsFrom(typoRaw);
+  const afterTypo = C.smartReconcile(state, typoRounds);
+  assert.equal(afterTypo.action, 'reanchored');
+  assert.equal(afterTypo.removed, 0);
+  assert.equal(C.materialize(afterTypo.state).through, 10);
+  assert.equal(C.reconcile(afterTypo.state, typoRounds).changed, false);
+
+  // Case 2: Deleting ONLY the last round (Round 10 -> 9 rounds left) trims cleanly to 9 instead of wiping the whole 10-round batch to 0, AND backs up 10 rounds in vault!
+  const rounds9 = typoRounds.slice(0, 9);
+  const afterTrim1 = C.smartReconcile(afterTypo.state, rounds9);
+  assert.equal(afterTrim1.action, 'trimmed');
+  assert.equal(C.materialize(afterTrim1.state).through, 9, 'Must keep Rounds 1-9 intact inside a 10-round batch!');
+  assert.equal(afterTrim1.state.vault?.through, 10, 'Original 10-round archive is safely stored in vault');
+  // Verify trimmed state passes full disk persistence validation
+  const persistedTrimmed = C.validateState(JSON.parse(JSON.stringify(afterTrim1.state)));
+  assert.equal(C.materialize(persistedTrimmed).through, 9);
+  assert.equal(persistedTrimmed.vault?.through, 10);
+
+  // Case 3: Large deletion (e.g. sudden drop from 9 rounds to 2 rounds or 0 rounds) triggers holdMismatch lock — ZERO worldbook data erased!
+  const suddenZero = C.smartReconcile(persistedTrimmed, []);
+  assert.equal(suddenZero.action, 'held');
+  assert.equal(suddenZero.state.holdMismatch, true);
+  assert.equal(C.materialize(suddenZero.state).through, 9, 'Worldbook memory MUST NOT be wiped to 0!');
+  assert.equal(suddenZero.state.vault?.through, 10, 'Highest 10-round vault backup is preserved, not overwritten by 9-round state');
+
+  // Case 4: One-click restoreFromVault recovers all 10 rounds with 0 API calls!
+  const restored10 = C.restoreFromVault(suddenZero.state, typoRounds);
+  assert.equal(restored10.holdMismatch, false);
+  assert.equal(C.materialize(restored10).through, 10);
+  assert.match(C.materialize(restored10).summary, /第1至10轮完整主线纪要/);
+});

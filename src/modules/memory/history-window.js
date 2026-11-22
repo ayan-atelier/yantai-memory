@@ -11,9 +11,8 @@ export function prepareHistoryWindow({ prepared, messages, state, owner, keepRou
       state.owner !== owner || !Number.isInteger(keepRounds) || keepRounds < 1 ||
       !['normal', 'regenerate', 'swipe', 'continue'].includes(type || 'normal')) return null;
   const rounds = C.roundsFrom(messages, stripCardMemory);
-  // A changed or unconfirmed prefix must be reconciled by the memory engine first.
-  if (C.reconcile(state, rounds).changed) return null;
   const through = C.materialize(state).through;
+  if (!through) return null;
   const count = Math.min(through, Math.max(0, rounds.length - keepRounds));
   if (!count) return null;
   const covered = new Set(rounds.slice(0, count).flatMap(r => r.source.map(s => s.id)));

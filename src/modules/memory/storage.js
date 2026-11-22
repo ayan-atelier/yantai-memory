@@ -562,7 +562,6 @@ export function createStorage(host, configuration, runtime = {}) {
   function filterLore(lores) {
     const active = current();
     const view = active ? confirmed.get(active.key) : null;
-    const dirty = !!runtime.isDirty?.();
     const cfg = configuration();
     const targetDepth = effectiveWorldbookDepth(cfg);
     for (const key of ['globalLore', 'characterLore', 'chatLore', 'personaLore']) {
@@ -571,7 +570,7 @@ export function createStorage(host, configuration, runtime = {}) {
       for (let i = list.length - 1; i >= 0; i--) {
         const tag = tagOf(list[i]);
         if (!tag) continue;
-        if (dirty || key !== 'chatLore' || tag.kind !== 'body' || !view?.state.enabled ||
+        if (key !== 'chatLore' || tag.kind !== 'body' || !view?.state.enabled ||
             tag.owner !== active?.key || tag.revision !== view.state.revision || binding(active) !== view.book || !list[i].content) {
           list.splice(i, 1);
         } else {

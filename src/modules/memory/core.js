@@ -1,8 +1,14 @@
-/* 砚台 · 叙事记忆核心确定性引擎（v0.4.1 · 分卷封存防失忆 & 轻量模型自愈解析） */
+/* 砚台 · 叙事记忆核心确定性引擎（v0.4.2 · 隐藏楼层穿透兼容 & 铁打防丢保险箱） */
 const JDMCore = (() => {
   'use strict';
-  const VERSION = '0.4.1';
+  const VERSION = '0.4.2';
   const DEFAULT_CHAPTER_SPAN = 24;
+  const DEFAULT_MAX_AUTO_TRIM = 3;
+  const NON_STORY_TYPES = new Set([
+    'help', 'welcome', 'empty', 'generic', 'comment',
+    'slash_commands', 'formatting', 'hotkeys', 'macros',
+    'welcome_prompt', 'assistant_note',
+  ]);
   const TENSIONS = ['平稳', '轻松', '紧张', '焦灼', '冲突', '缓和', '未明'];
   const KINDS = ['未完成事项', '约定', '誓言', '任务', '案件', '线索', '悬念'];
   const EVENT_KINDS = ['scene', 'decision', 'clue', 'discovery', 'confrontation', 'consequence', 'transition', 'relationship', 'routine'];
@@ -57,6 +63,27 @@ const JDMCore = (() => {
     return mode && action;
   }
 
+  /**
+   * 区分「真正的酒馆非剧情系统消息」（欢迎卡片、/comment 场外备注、工具调用等）
+   * 与「被玩家 /hide 隐藏的正常对话楼层」（酒馆 /hide 仅将 m.is_system 设为 true）。
+   * 被 /hide 隐藏的 User / 角色剧情楼层一律视为有效剧情消息，保证隐藏楼层不丢记忆、可读可归档。
+   */
+  function isNonStoryMessage(m) {
+    if (!m || typeof m.mes !== 'string' || !m.mes.trim()) return true;
+    if (m.is_user) return false;
+    const extra = m.extra;
+    if (extra && typeof extra === 'object') {
+      if (extra.uses_system_ui || extra.isSmallSys) return true;
+      if (extra.type && NON_STORY_TYPES.has(String(extra.type))) return true;
+      if (Array.isArray(extra.tool_invocations) && extra.tool_invocations.length > 0) return true;
+      if (Array.isArray(extra.tool_calls) && extra.tool_calls.length > 0) return true;
+    }
+    if (m.is_system && (m.name === 'System' || m.force_avatar === 'img/five.png' || m.force_avatar === 'system') && extra?.type !== 'narrator') {
+      return true;
+    }
+    return false;
+  }
+
   function roundsFrom(messages, stripCardMemory = true) {
     const rounds = [];
     let prelude = [], current = null;
@@ -75,8 +102,8 @@ const JDMCore = (() => {
       prelude = [];
       current = null;
     };
-    messages.forEach((m, id) => {
-      if (!m || m.is_system || typeof m.mes !== 'string' || !m.mes.trim()) return;
+    (messages || []).forEach((m, id) => {
+      if (isNonStoryMessage(m)) return;
       const message = { id, role: m.is_user ? 'user' : 'assistant', name: String(m.name || ''), raw: m.mes };
       if (message.role === 'user') {
         if (current?.some(x => x.role === 'assistant')) finish();
@@ -101,6 +128,8 @@ const JDMCore = (() => {
       pausedByUser: false,
       lastError: '',
       compact: null,
+      holdMismatch: false,
+      vault: null,
       createdAt: new Date().toISOString(),
     };
   }
@@ -678,6 +707,206 @@ const JDMCore = (() => {
     return { state: next, changed: true, removed: materialize(state).through - cursor };
   }
 
+  /**
+   * 前文编辑／错别字修改／切换某楼 swipe 但总轮数未减少时，重新锚定批次签名，一轮记忆都不删除。
+   */
+  function reanchorState(state, rounds) {
+    const through = materialize(state).through;
+    if (!Array.isArray(rounds) || rounds.length < through) return clone(state);
+    let cursor = 0;
+    const nextHistory = state.history.map(batch => {
+      const len = batch.sources.length;
+      const nextSources = rounds.slice(cursor, cursor + len).map(r => r.signature);
+      const nextPrefix = hash(JSON.stringify(rounds.slice(0, cursor + len).map(r => r.signature)));
+      cursor += len;
+      return { ...clone(batch), sources: nextSources, prefix: nextPrefix };
+    });
+    return { ...clone(state), history: nextHistory, holdMismatch: false };
+  }
+
+  /**
+   * 精确裁剪并重锚定至指定轮数（targetCount < through），支持单批跨多轮时的批次内保留，绝不连坐整批清零。
+   */
+  function trimStateToRounds(state, rounds) {
+    const targetCount = Array.isArray(rounds) ? rounds.length : 0;
+    const oldThrough = materialize(state).through;
+    if (targetCount >= oldThrough) return reanchorState(state, rounds);
+    if (targetCount <= 0) {
+      return { ...clone(state), history: [], compact: null, holdMismatch: false };
+    }
+
+    let cursor = 0;
+    const nextHistory = [];
+    for (const batch of state.history) {
+      const len = batch.sources.length;
+      if (len === 0) {
+        if (cursor <= targetCount) {
+          const nextPrefix = hash(JSON.stringify(rounds.slice(0, cursor).map(r => r.signature)));
+          const copy = { ...clone(batch), prefix: nextPrefix };
+          if (Array.isArray(copy.delta?.replaceChapters)) {
+            copy.delta.replaceChapters = copy.delta.replaceChapters
+              .filter(ch => (Number(ch.fromRound) || 1) <= targetCount)
+              .map((ch, idx) => ({ ...ch, index: idx + 1, toRound: Math.min(Number(ch.toRound) || targetCount, targetCount) }));
+            copy.delta.summary = composeChronicle(copy.delta.replaceChapters, copy.delta.openChapter) || copy.delta.summary;
+          }
+          nextHistory.push(copy);
+        }
+        continue;
+      }
+      if (cursor + len <= targetCount) {
+        const nextSources = rounds.slice(cursor, cursor + len).map(r => r.signature);
+        const nextPrefix = hash(JSON.stringify(rounds.slice(0, cursor + len).map(r => r.signature)));
+        nextHistory.push({ ...clone(batch), sources: nextSources, prefix: nextPrefix });
+        cursor += len;
+        continue;
+      }
+      if (cursor < targetCount) {
+        const nextSources = rounds.slice(cursor, targetCount).map(r => r.signature);
+        const nextPrefix = hash(JSON.stringify(rounds.slice(0, targetCount).map(r => r.signature)));
+        if (batch.skip) {
+          nextHistory.push({ ...clone(batch), sources: nextSources, prefix: nextPrefix });
+        } else {
+          const nextDelta = clone(batch.delta);
+          nextDelta.events = (nextDelta.events || []).filter(e => e.round <= targetCount);
+          nextDelta.corrections = (nextDelta.corrections || []).filter(c => c.round <= targetCount);
+          if (nextDelta.sealedChapter) {
+            const sc = nextDelta.sealedChapter;
+            delete nextDelta.sealedChapter;
+            nextDelta.chapterMode = true;
+            nextDelta.chapterFromRound = sc.fromRound;
+            nextDelta.chapterTitle = sc.title || '';
+            nextDelta.chapterSummary = sc.summary || '';
+          }
+          nextHistory.push({ ...clone(batch), sources: nextSources, prefix: nextPrefix, delta: nextDelta });
+        }
+        cursor = targetCount;
+      }
+      break;
+    }
+
+    const nextCompact = state.compact && state.compact.through <= targetCount ? clone(state.compact) : null;
+    return { ...clone(state), history: nextHistory, compact: nextCompact, holdMismatch: false };
+  }
+
+  /**
+   * 内部保险箱快照：始终保留更高轮数的历史完整记忆（0 Token 占用），防止连续回退冲掉最初完整备份。
+   */
+  function captureVault(existingVault, prevState, reason = '剧情回退前自动存档') {
+    const prevThrough = materialize(prevState).through;
+    if (prevThrough <= 0) return existingVault ? clone(existingVault) : null;
+    if (existingVault && Number(existingVault.through) > prevThrough && Array.isArray(existingVault.history) && existingVault.history.length > 0) {
+      return clone(existingVault);
+    }
+    return {
+      through: prevThrough,
+      history: clone(prevState.history),
+      compact: prevState.compact ? clone(prevState.compact) : null,
+      at: new Date().toISOString(),
+      reason: String(reason || '剧情回退前自动存档').slice(0, 120),
+    };
+  }
+
+  /**
+   * 铁打不丢对齐策略：
+   * 1. 完全一致 -> 若此前处于保护锁定态则自动解锁；
+   * 2. 轮数未少（>= oldThrough），仅前文改字／修错别字／切换 swipe -> 自动重锚定签名，0 轮丢失；
+   * 3. 尾部小幅删楼悔棋（减少 1—3 轮且聊天非空） -> 精确裁剪至当前轮数，并将完整旧版自动存入 vault 保险箱；
+   * 4. 大幅减少（> 3 轮）或聊天突变为 0 轮 -> 触发防清零保护锁（holdMismatch=true），原世界书记忆一字不删！
+   */
+  function smartReconcile(state, rounds, options = {}) {
+    const maxAutoTrim = Number.isInteger(options.maxAutoTrim) ? options.maxAutoTrim : DEFAULT_MAX_AUTO_TRIM;
+    const oldThrough = materialize(state).through;
+    const newCount = Array.isArray(rounds) ? rounds.length : 0;
+
+    if (oldThrough === 0) {
+      if (state.holdMismatch) {
+        return { state: { ...clone(state), holdMismatch: false }, changed: true, action: 'unheld', removed: 0, oldThrough: 0, newThrough: 0 };
+      }
+      return { state, changed: false, action: 'none', removed: 0, oldThrough: 0, newThrough: 0 };
+    }
+
+    const exact = reconcile(state, rounds);
+    if (!exact.changed) {
+      if (state.holdMismatch) {
+        return { state: { ...clone(state), holdMismatch: false }, changed: true, action: 'unheld', removed: 0, oldThrough, newThrough: oldThrough };
+      }
+      return { state, changed: false, action: 'none', removed: 0, oldThrough, newThrough: oldThrough };
+    }
+
+    if (newCount >= oldThrough) {
+      const reanchored = reanchorState(state, rounds);
+      return {
+        state: reanchored,
+        changed: true,
+        action: 'reanchored',
+        removed: 0,
+        oldThrough,
+        newThrough: oldThrough,
+      };
+    }
+
+    const drop = oldThrough - newCount;
+    if (newCount > 0 && drop <= maxAutoTrim) {
+      const vault = captureVault(state.vault, state, `删楼回退前备份（共 ${oldThrough} 轮）`);
+      const trimmed = { ...trimStateToRounds(state, rounds), vault };
+      const afterThrough = materialize(trimmed).through;
+      return {
+        state: trimmed,
+        changed: true,
+        action: 'trimmed',
+        removed: oldThrough - afterThrough,
+        oldThrough,
+        newThrough: afterThrough,
+      };
+    }
+
+    const vault = captureVault(state.vault, state, `大幅变动保护备份（共 ${oldThrough} 轮）`);
+    const vaultUpdated = JSON.stringify(vault?.history || null) !== JSON.stringify(state.vault?.history || null);
+    if (state.holdMismatch && !vaultUpdated) {
+      return { state, changed: false, action: 'held', removed: 0, oldThrough, newThrough: oldThrough };
+    }
+    return {
+      state: { ...clone(state), holdMismatch: true, vault },
+      changed: true,
+      action: 'held',
+      removed: 0,
+      oldThrough,
+      newThrough: oldThrough,
+    };
+  }
+
+  /**
+   * 玩家主动点击“确认按当前聊天轮数对齐”：将原记忆存入保险箱后裁剪至当前轮数。
+   */
+  function confirmAlignState(state, rounds) {
+    const oldThrough = materialize(state).through;
+    const vault = captureVault(state.vault, state, `手动对齐前备份（共 ${oldThrough} 轮）`);
+    return { ...trimStateToRounds(state, rounds), vault, holdMismatch: false };
+  }
+
+  /**
+   * 从内部保险箱一键无损恢复完整历史记忆（0 次模型请求）。
+   */
+  function restoreFromVault(state, rounds) {
+    if (!state?.vault || !Array.isArray(state.vault.history) || !state.vault.history.length) {
+      throw new Error('保险箱中暂无可恢复的更高进度记忆备份。');
+    }
+    const candidate = {
+      ...clone(state),
+      history: clone(state.vault.history),
+      compact: state.vault.compact ? clone(state.vault.compact) : null,
+      holdMismatch: false,
+      pausedByUser: false,
+      lastError: '',
+    };
+    const vaultThrough = materialize(candidate).through;
+    const newCount = Array.isArray(rounds) ? rounds.length : 0;
+    if (newCount >= vaultThrough) {
+      return reanchorState(candidate, rounds);
+    }
+    return { ...candidate, holdMismatch: true };
+  }
+
   function validateDelta(raw, old, expectedRounds, batchId = uid(), options = {}) {
     const value = typeof raw === 'string' ? parseResponse(raw) : raw;
     if (!isObject(value)) throw new Error('记忆返回必须是一个对象。');
@@ -888,40 +1117,28 @@ const JDMCore = (() => {
     };
   }
 
-  function validateState(input) {
-    if (!input || input.schema !== 1 || typeof input.owner !== 'string' || !Array.isArray(input.history)) {
-      throw new Error('不是此版本的记忆备份。');
-    }
-    const compact = input.compact && isObject(input.compact) && Number.isInteger(input.compact.through)
-      && input.compact.through >= 0 && typeof input.compact.summary === 'string' && input.compact.summary.trim()
+  function normalizeCompactRecord(rawCompact) {
+    return rawCompact && isObject(rawCompact) && Number.isInteger(rawCompact.through)
+      && rawCompact.through >= 0 && typeof rawCompact.summary === 'string' && rawCompact.summary.trim()
       ? {
-          through: input.compact.through,
-          level: Math.max(1, Math.min(2, Number(input.compact.level) || 1)),
-          summary: input.compact.summary.trim().slice(0, 120000),
-          keepRounds: Math.max(0, Math.min(16, Number(input.compact.keepRounds) || 5)),
-          at: String(input.compact.at || new Date().toISOString()),
+          through: rawCompact.through,
+          level: Math.max(1, Math.min(2, Number(rawCompact.level) || 1)),
+          summary: rawCompact.summary.trim().slice(0, 120000),
+          keepRounds: Math.max(0, Math.min(16, Number(rawCompact.keepRounds) || 5)),
+          at: String(rawCompact.at || new Date().toISOString()),
         }
       : null;
+  }
 
-    const state = {
-      ...emptyState(input.owner),
-      revision: String(input.revision || ''),
-      enabled: !!input.enabled,
-      note: String(input.note || ''),
-      pausedByUser: !!input.pausedByUser || (!!input.pausedOnError && input.lastError === '已停止整理。旧记忆保留，不会自动重试。'),
-      lastError: String(input.lastError || ''),
-      compact,
-      history: [],
-      createdAt: input.createdAt || new Date().toISOString(),
-    };
-
+  function validateHistoryList(rawHistory, owner = '') {
+    const tempState = { ...emptyState(owner), history: [] };
     let through = 0;
-    for (const batch of input.history) {
+    for (const batch of rawHistory) {
       if (!batch || !Array.isArray(batch.sources) || !batch.sources.every(x => typeof x === 'string') || typeof batch.prefix !== 'string') {
         throw new Error('备份来源记录不完整。');
       }
       if (batch.skip) {
-        state.history.push({
+        tempState.history.push({
           id: String(batch.id || uid()),
           at: String(batch.at || ''),
           sources: [...batch.sources],
@@ -933,11 +1150,11 @@ const JDMCore = (() => {
         through += batch.sources.length;
         continue;
       }
-      const old = materialize(state);
+      const old = materialize(tempState);
       const persistedIds = (batch.delta?.threads?.upsert || []).filter(t => !old.threads.some(x => x.id === t.id));
       const syntheticOld = { ...old, threads: [...old.threads, ...persistedIds] };
       const delta = validateDelta(batch.delta, syntheticOld, batch.sources.map((_, i) => through + i + 1), 'restore');
-      state.history.push({
+      tempState.history.push({
         id: String(batch.id || uid()),
         at: String(batch.at || ''),
         sources: [...batch.sources],
@@ -947,7 +1164,47 @@ const JDMCore = (() => {
       });
       through += batch.sources.length;
     }
-    return state;
+    return { history: tempState.history, through };
+  }
+
+  function validateState(input) {
+    if (!input || input.schema !== 1 || typeof input.owner !== 'string' || !Array.isArray(input.history)) {
+      throw new Error('不是此版本的记忆备份。');
+    }
+    const compact = normalizeCompactRecord(input.compact);
+    const { history } = validateHistoryList(input.history, input.owner);
+
+    let vault = null;
+    if (isObject(input.vault) && Array.isArray(input.vault.history) && input.vault.history.length > 0) {
+      try {
+        const validatedVault = validateHistoryList(input.vault.history, input.owner);
+        if (validatedVault.through > 0) {
+          vault = {
+            through: validatedVault.through,
+            history: validatedVault.history,
+            compact: normalizeCompactRecord(input.vault.compact),
+            at: String(input.vault.at || new Date().toISOString()),
+            reason: String(input.vault.reason || '历史记忆备份').slice(0, 120),
+          };
+        }
+      } catch {
+        vault = null;
+      }
+    }
+
+    return {
+      ...emptyState(input.owner),
+      revision: String(input.revision || ''),
+      enabled: !!input.enabled,
+      note: String(input.note || ''),
+      pausedByUser: !!input.pausedByUser || (!!input.pausedOnError && input.lastError === '已停止整理。旧记忆保留，不会自动重试。'),
+      lastError: String(input.lastError || ''),
+      compact,
+      holdMismatch: !!input.holdMismatch,
+      vault,
+      history,
+      createdAt: input.createdAt || new Date().toISOString(),
+    };
   }
 
   function safeText(text) {
@@ -1361,6 +1618,7 @@ const JDMCore = (() => {
   return {
     VERSION,
     DEFAULT_CHAPTER_SPAN,
+    DEFAULT_MAX_AUTO_TRIM,
     TENSIONS,
     KINDS,
     FORMAT,
@@ -1368,6 +1626,7 @@ const JDMCore = (() => {
     hash,
     clone,
     clean,
+    isNonStoryMessage,
     isStandaloneDirective,
     roundsFrom,
     emptyState,
@@ -1378,6 +1637,12 @@ const JDMCore = (() => {
     materialize,
     projectForPrompt,
     reconcile,
+    reanchorState,
+    trimStateToRounds,
+    captureVault,
+    smartReconcile,
+    confirmAlignState,
+    restoreFromVault,
     parseResponse,
     validateDelta,
     validateState,

@@ -41,12 +41,20 @@ const JDMEngine = (() => {
         const loaded = await this.a.load(context);
         if (epoch !== this.operationEpoch || !this.current(context.key)) throw new Error('聊天已切换，停止本次操作。');
         const rounds = C.roundsFrom(context.messages, this.configuration().stripCardMemory !== false);
-        const checked = C.reconcile(loaded.state, rounds);
+        const checked = C.smartReconcile(loaded.state, rounds);
         let state = checked.state;
         if (checked.changed && !loaded.fork) {
           state = await this.a.save(context, state, loaded, () => epoch === this.operationEpoch && this.current(context.key));
           if (epoch !== this.operationEpoch || !this.current(context.key)) throw new Error('剧情已改变，停止本次操作。');
-          this.report(`剧情已修改，记忆已对齐回第 ${C.materialize(state).through} 轮。`);
+          if (checked.action === 'reanchored') {
+            this.report(`检测到前文微调，已自动续接原有 ${checked.newThrough} 轮世界书记忆（未清除任何记录）。`, 'info');
+          } else if (checked.action === 'trimmed') {
+            this.report(`已随删楼对齐至第 ${checked.newThrough} 轮（回退前的 ${checked.oldThrough} 轮完整记忆已存入保险箱，可随时一键恢复）。`, 'info');
+          } else if (checked.action === 'held') {
+            this.report(`防丢保护已锁定：世界书已存 ${checked.oldThrough} 轮记忆，多于当前可见 ${rounds.length} 轮，未自动清除原记忆。`, 'info');
+          } else if (checked.action === 'unheld') {
+            this.report(`已恢复衔接原有 ${checked.newThrough} 轮世界书记忆。`, 'success');
+          }
         }
         return { context, rounds, state, loaded: { ...loaded, state }, memory: C.materialize(state) };
       });
@@ -58,11 +66,44 @@ const JDMEngine = (() => {
         const context = this.a.context();
         if (!context) throw new Error('请先打开一个角色聊天。');
         const loaded = await this.a.load(context);
-        const reconciled = C.reconcile(loaded.state, C.roundsFrom(context.messages, this.configuration().stripCardMemory !== false)).state;
+        const reconciled = C.smartReconcile(loaded.state, C.roundsFrom(context.messages, this.configuration().stripCardMemory !== false)).state;
         const state = { ...reconciled, enabled, pausedByUser: false, lastError: '' };
         await this.a.save(context, state, loaded, () => this.current(context.key));
         this.retryAfterFailure.delete(context.key);
         this.report(enabled ? '当前聊天记忆已开启，满间隔自动整理。' : '已暂停本聊天记忆整理与注入，已有记录完整保留。');
+      });
+    }
+
+    async confirmAlign() {
+      this.cancel('正在按当前聊天对齐记忆进度。', false);
+      return this.serial(async () => {
+        const context = this.a.context();
+        if (!context) throw new Error('请先打开一个角色聊天。');
+        const loaded = await this.a.load(context);
+        const rounds = C.roundsFrom(context.messages, this.configuration().stripCardMemory !== false);
+        const oldThrough = C.materialize(loaded.state).through;
+        const aligned = C.confirmAlignState(loaded.state, rounds);
+        const saved = await this.a.save(context, { ...aligned, pausedByUser: false, lastError: '' }, loaded, () => this.current(context.key));
+        const afterThrough = C.materialize(saved).through;
+        this.retryAfterFailure.delete(context.key);
+        this.report(`已对齐至第 ${afterThrough} 轮（原 ${oldThrough} 轮完整记忆已保留在保险箱，随时可恢复）。`, 'success');
+        return saved;
+      });
+    }
+
+    async restoreVault() {
+      this.cancel('正在从保险箱恢复原记忆。', false);
+      return this.serial(async () => {
+        const context = this.a.context();
+        if (!context) throw new Error('请先打开一个角色聊天。');
+        const loaded = await this.a.load(context);
+        const rounds = C.roundsFrom(context.messages, this.configuration().stripCardMemory !== false);
+        const restored = C.restoreFromVault(loaded.state, rounds);
+        const saved = await this.a.save(context, restored, loaded, () => this.current(context.key));
+        const afterThrough = C.materialize(saved).through;
+        this.retryAfterFailure.delete(context.key);
+        this.report(`已从保险箱无损恢复全部 ${afterThrough} 轮世界书记忆（0 次请求）。`, 'success');
+        return saved;
       });
     }
 
@@ -102,6 +143,12 @@ const JDMEngine = (() => {
           if (manual) throw new Error('请先开启“当前聊天启用记忆”。');
           return false;
         }
+        if (state.holdMismatch) {
+          if (manual) {
+            throw new Error(`当前处于记忆防丢保护态（世界书已存 ${memory.through} 轮，当前聊天可见 ${rounds.length} 轮）。为保护原世界书记忆不被覆盖，请先在总览上方确认对齐或恢复楼层。`);
+          }
+          return false;
+        }
         if (!manual && state.pausedByUser) {
           this.report('自动整理已手动暂停，点“立即整理”成功后恢复。');
           return false;
@@ -136,6 +183,9 @@ const JDMEngine = (() => {
             const next = { ...state, history: [...state.history, journal], compact: nextCompact, pausedByUser: false, lastError: '' };
             await this.a.save(context, next, fresh, samePrefix);
           });
+          if (config.autoHideArchived) {
+            try { await this.a.autoHideOldMessages?.(rounds, memory.through + count, config); } catch { /* ignore UI hide error */ }
+          }
           this.report(`已自动跳过 ${count} 轮独立番外，不计入主线记忆。`);
           return true;
         }
@@ -197,11 +247,18 @@ const JDMEngine = (() => {
         });
 
         this.retryAfterFailure.delete(context.key);
+        const newThrough = memory.through + batch.length;
+        let hiddenCount = 0;
+        if (config.autoHideArchived) {
+          try { hiddenCount = Number(await this.a.autoHideOldMessages?.(rounds, newThrough, config)) || 0; }
+          catch { hiddenCount = 0; }
+        }
         const sealedNotice = delta.sealedChapter
           ? `（第 ${delta.sealedChapter.index} 卷「第 ${delta.sealedChapter.fromRound}—${delta.sealedChapter.toRound} 轮」已封存锁定）`
           : '';
+        const hideNotice = hiddenCount > 0 ? `已自动隐藏前序 ${hiddenCount} 楼旧对话。` : '';
         this.report(
-          `已整理至第 ${memory.through + batch.length} 轮${sealedNotice}。${pending.length > batch.length ? `尚有 ${pending.length - batch.length} 轮积压待补。` : '后续对话将自动携带最新记忆。'}`,
+          `已整理至第 ${newThrough} 轮${sealedNotice}。${hideNotice}${pending.length > batch.length ? `尚有 ${pending.length - batch.length} 轮积压待补。` : '后续对话将自动携带最新记忆。'}`,
           'success',
         );
         return true;

@@ -25,6 +25,7 @@ export const MEMORY_DEFAULTS = Object.freeze({
   extraBody: '{}',
   preset: DEFAULT_PRESET,
   autoEnableNewChats: true,
+  autoHideArchived: false,
   assistantAutoCompress: false,
   assistantWarnTokens: 8000,
   assistantAutoTokens: 12000,
@@ -125,6 +126,9 @@ export function validateConfig(candidate) {
   };
   if (!['main', 'st_mate_aux', 'custom'].includes(next.apiMode)) throw new Error('请选择有效的记忆连接方式。');
   next.mainModelOverride = String(next.mainModelOverride || '').trim().slice(0, 200);
+  next.autoEnableNewChats = next.autoEnableNewChats !== false;
+  next.autoHideArchived = Boolean(next.autoHideArchived);
+  next.assistantAutoCompress = Boolean(next.assistantAutoCompress);
   for (const [key, [label, min, max]] of Object.entries(NUMERIC_FIELDS)) {
     next[key] = Number(next[key]);
     if (!Number.isFinite(next[key]) || next[key] < min || next[key] > max || (key !== 'temperature' && !Number.isInteger(next[key]))) {
@@ -151,8 +155,11 @@ export function parseBackup(text, rounds) {
     throw new Error('请选择砚台或静读导出的记忆备份文件。');
   }
   const state = C.validateState(data.state || data);
-  if (C.reconcile(state, rounds).changed) throw new Error('备份与当前聊天正文不匹配，未导入，避免串入其他存档。');
-  return state;
+  const through = C.materialize(state).through;
+  if (Array.isArray(rounds) && rounds.length >= through) {
+    return C.reanchorState(state, rounds);
+  }
+  return { ...state, holdMismatch: through > 0 };
 }
 
 export async function createMemory({ host, store, ui }) {
@@ -192,15 +199,81 @@ export async function createMemory({ host, store, ui }) {
   let renameOpenKey = '', renameDraft = '';
   const noteDrafts = new Map(), cleanups = [];
 
+  const copyCapturedMessage = m => {
+    const item = { name: m.name, mes: m.mes, is_user: m.is_user, is_system: m.is_system };
+    if (m.force_avatar) item.force_avatar = m.force_avatar;
+    if (m.extra && typeof m.extra === 'object') {
+      item.extra = {
+        type: m.extra.type,
+        uses_system_ui: m.extra.uses_system_ui,
+        isSmallSys: m.extra.isSmallSys,
+        tool_invocations: Array.isArray(m.extra.tool_invocations) && m.extra.tool_invocations.length ? [true] : undefined,
+        tool_calls: Array.isArray(m.extra.tool_calls) && m.extra.tool_calls.length ? [true] : undefined,
+      };
+    }
+    return item;
+  };
+
   const capture = () => {
     const chat = host.currentChat();
     if (!chat || chat.isGroup) return null;
-    const messages = (chat.messages || []).map(m => ({ name: m.name, mes: m.mes, is_user: m.is_user, is_system: m.is_system }));
+    const messages = (chat.messages || []).map(copyCapturedMessage);
     if (generation?.key === chat.key && ['regenerate', 'swipe'].includes(generation.type) && !messages.at(-1)?.is_user) {
       messages.pop();
     }
     return { ...chat, messages };
   };
+
+  let chatsBridgePromise = null;
+  async function autoHideOldMessages(rounds, through, cfg = config()) {
+    const keepRounds = Math.max(1, Number(cfg?.historyRounds) || 5);
+    const hideRoundCount = Math.min(Number(through) || 0, Math.max(0, (rounds?.length || 0) - keepRounds));
+    if (hideRoundCount <= 0) return 0;
+    const liveChat = host.currentChat()?.messages;
+    if (!Array.isArray(liveChat) || !liveChat.length) return 0;
+
+    // Preserve message 0 (greeting card often hosts global <style> blocks in themed cards)
+    const targetIds = rounds
+      .slice(0, hideRoundCount)
+      .flatMap(r => r.source.map(s => s.id))
+      .filter(id => Number.isInteger(id) && id >= 1 && liveChat[id] && !liveChat[id].is_system)
+      .sort((a, b) => a - b);
+
+    if (!targetIds.length) return 0;
+
+    const ranges = [];
+    for (const id of targetIds) {
+      const last = ranges.at(-1);
+      if (last && id === last[1] + 1) last[1] = id;
+      else ranges.push([id, id]);
+    }
+
+    let usedNative = false;
+    try {
+      chatsBridgePromise ||= import('/scripts/chats.js');
+      const chatsMod = await chatsBridgePromise;
+      if (typeof chatsMod?.hideChatMessageRange === 'function') {
+        for (const [start, end] of ranges) {
+          await chatsMod.hideChatMessageRange(start, end, false);
+        }
+        usedNative = true;
+      }
+    } catch {
+      usedNative = false;
+    }
+
+    if (!usedNative) {
+      for (const id of targetIds) {
+        if (!liveChat[id]) continue;
+        liveChat[id].is_system = true;
+        globalThis.document?.querySelector?.(`.mes[mesid="${id}"]`)?.setAttribute?.('is_system', 'true');
+      }
+      const ctx = host.context();
+      if (typeof ctx?.saveChatConditional === 'function') await ctx.saveChatConditional();
+      else if (typeof ctx?.saveChat === 'function') await ctx.saveChat();
+    }
+    return targetIds.length;
+  }
 
   function report(message, kind = 'info') {
     statusText = String(message);
@@ -219,7 +292,7 @@ export async function createMemory({ host, store, ui }) {
 
   const storage = createStorage(host, config, { context: capture, alive: () => alive, isDirty: () => memoryDirty });
   const api = createApi(host);
-  const adapter = { ...storage, ...api, context: capture, key: () => capture()?.key, isGenerating: () => !!generation };
+  const adapter = { ...storage, ...api, autoHideOldMessages, context: capture, key: () => capture()?.key, isGenerating: () => !!generation };
   const engine = new Engine(adapter, config, report);
   const gate = createSyncGate({
     engine,
@@ -295,7 +368,7 @@ export async function createMemory({ host, store, ui }) {
     const loaded = await storage.load(chat);
     if (capture()?.key !== chat.key) return null;
     const rounds = C.roundsFrom(chat.messages, true);
-    const state = C.reconcile(loaded.state, rounds).state;
+    const state = C.smartReconcile(loaded.state, rounds).state;
     return { chat, loaded, rounds, state, memory: C.materialize(state) };
   }
 
@@ -559,6 +632,53 @@ export async function createMemory({ host, store, ui }) {
     if (loaded.fork) overview.append(node('p', '检测到分支存档副本，已默认暂停记忆；勾选上方开关可为此分支建立独立记忆书。', 'yt-notice'));
     if (loaded.legacy) overview.append(node('p', '检测到旧版静读记忆，可在“整理配置 → 备份与导入导出”中迁移接管。', 'yt-notice'));
 
+    if (state.holdMismatch && memory.through > rounds.length) {
+      const guardBox = node('div', undefined, 'yt-subpanel yt-guard-box');
+      guardBox.append(
+        node(
+          'p',
+          `防丢保护生效中：世界书内已保存完整的 ${memory.through} 轮记忆，多于当前聊天的 ${rounds.length} 轮。插件已锁定保护原记忆，不会自动清除（生成回复时该世界书记忆仍继续生效）。`,
+          'yt-guard-text',
+        ),
+      );
+      const guardActions = node('div', undefined, 'yt-inline');
+      const alignLabel = rounds.length > 0
+        ? `确认删楼重聊 · 对齐至第 ${rounds.length} 轮（原 ${memory.through} 轮留存保险箱）`
+        : `确认清空重开 · 重置为 0 轮（原 ${memory.through} 轮留存保险箱）`;
+      guardActions.append(
+        button(alignLabel, action(async () => {
+          const msg = rounds.length > 0
+            ? `确认将记忆进度对齐到当前第 ${rounds.length} 轮？原有的全部 ${memory.through} 轮记忆仍会妥善保存在内部保险箱中，随时可一键恢复。`
+            : `确认将当前记忆重置为 0 轮？原有的全部 ${memory.through} 轮记忆仍会妥善保存在内部保险箱中，随时可一键恢复。`;
+          if (!await ui.confirm(msg, { title: '确认对齐记忆进度', confirmLabel: '确认对齐' })) return;
+          await engine.confirmAlign();
+          await refresh({ force: true });
+        })),
+      );
+      guardBox.append(guardActions);
+      overview.append(guardBox);
+    }
+
+    if (state.vault && Number(state.vault.through) > memory.through) {
+      const vaultBox = node('div', undefined, 'yt-subpanel yt-vault-box');
+      vaultBox.append(
+        node(
+          'p',
+          `世界书保险箱存有回退前的完整第 1—${state.vault.through} 轮记忆备份（不占提示词 Token）。若此前为误操作，可随时一键恢复：`,
+          'yt-guard-text',
+        ),
+      );
+      const vaultActions = node('div', undefined, 'yt-inline');
+      vaultActions.append(
+        button(`一键无损恢复全部 ${state.vault.through} 轮记忆 · 0 请求`, action(async () => {
+          await engine.restoreVault();
+          await refresh({ force: true });
+        }), true),
+      );
+      vaultBox.append(vaultActions);
+      overview.append(vaultBox);
+    }
+
     const estimate = memoryEstimate(view);
     const sealedCount = memory.chapters?.length || (memory.through > 0 && !memory.openChapter ? 1 : 0);
     const stats = node('div', undefined, 'yt-memory-stats');
@@ -617,7 +737,7 @@ export async function createMemory({ host, store, ui }) {
         ? `聊天世界书：首次满轮整理时将建立「${storage.previewBookName(chat)}」（0 轮看卡不空建世界书）`
         : '聊天世界书：首次满轮整理时自动建立（0 轮看卡不空建世界书，不改动角色世界书）';
     metaList.append(
-      node('p', `节奏：每 ${cfg.frequency} 轮自动整理 · 每满 ${cfg.chapterSpan} 轮封存一卷（永不重洗旧卷） · 保留最近 ${cfg.historyRounds} 轮对话原文`, 'yt-muted'),
+      node('p', `节奏：每 ${cfg.frequency} 轮自动整理 · 每满 ${cfg.chapterSpan} 轮封存一卷（永不重洗旧卷） · 保留最近 ${cfg.historyRounds} 轮对话原文${cfg.autoHideArchived ? ' · 归档后自动 /hide 旧楼层' : '（支持手动 /hide 不丢记忆）'}`, 'yt-muted'),
       node('p', bookStatusLine, 'yt-muted'),
       node('p', injectionText, 'yt-muted yt-memory-injection'),
     );
@@ -931,7 +1051,11 @@ export async function createMemory({ host, store, ui }) {
       draftSettings = { ...(draftSettings || {}), autoEnableNewChats: autoEnable.input.checked };
     });
     controls.autoEnableNewChats = autoEnable.input;
-    cadenceSec.append(autoEnable.wrap);
+    const autoHideToggle = toggle('归档后自动隐藏旧楼层（自动 /hide 前序已记消息，缓解手机端长对话卡顿）', !!current.autoHideArchived, () => {
+      draftSettings = { ...(draftSettings || {}), autoHideArchived: autoHideToggle.input.checked };
+    });
+    controls.autoHideArchived = autoHideToggle.input;
+    cadenceSec.append(autoEnable.wrap, autoHideToggle.wrap);
 
     const primaryKeys = ['frequency', 'batchSize', 'chapterSpan', 'historyRounds'];
     const primaryGrid = node('div', undefined, 'yt-grid');
@@ -958,6 +1082,7 @@ export async function createMemory({ host, store, ui }) {
         extraBody: controls.extraBody.value.trim(),
         preset: controls.preset.value.trim(),
         autoEnableNewChats: controls.autoEnableNewChats.checked,
+        autoHideArchived: controls.autoHideArchived.checked,
         assistantAutoCompress: controls.assistantAutoCompress.checked,
       };
       for (const key of Object.keys(NUMERIC_FIELDS)) next[key] = controls[key].value;
@@ -970,13 +1095,21 @@ export async function createMemory({ host, store, ui }) {
       draftSettings = null;
       draftPreset = null;
       const chat = capture();
+      let hiddenNow = 0;
       if (chat) {
         await engine.serial(async () => {
           const loaded = await storage.load(chat);
           if (loaded.owned) await storage.save(chat, loaded.state, loaded, () => capture()?.key === chat.key);
+          if (validated.autoHideArchived && loaded.state.enabled) {
+            const rounds = C.roundsFrom(chat.messages, true);
+            const through = C.materialize(loaded.state).through;
+            if (through > 0) {
+              try { hiddenNow = await autoHideOldMessages(rounds, through, validated); } catch { hiddenNow = 0; }
+            }
+          }
         });
       }
-      report('配置已保存并立即生效。', 'success');
+      report(hiddenNow > 0 ? `配置已保存并立即生效（已顺手自动隐藏前序 ${hiddenNow} 楼已记对话）。` : '配置已保存并立即生效。', 'success');
       await refresh({ force: true });
     }), true);
 
@@ -1060,8 +1193,11 @@ export async function createMemory({ host, store, ui }) {
         if (!fresh) return;
         const legacy = parseState(fresh.loaded.data, true);
         if (!legacy) throw new Error('未找到旧版内部备份条目。');
-        if (C.reconcile(legacy, fresh.rounds).changed) throw new Error('旧版备份与当前聊天正文不一致。');
-        await restoreState(legacy, fresh.chat, fresh.loaded, true);
+        const legacyThrough = C.materialize(legacy).through;
+        const normalizedLegacy = fresh.rounds.length >= legacyThrough
+          ? C.reanchorState(legacy, fresh.rounds)
+          : { ...legacy, holdMismatch: legacyThrough > 0 };
+        await restoreState(normalizedLegacy, fresh.chat, fresh.loaded, true);
       }), true));
     }
     dataDetails.append(backups);
@@ -1137,6 +1273,7 @@ export async function createMemory({ host, store, ui }) {
       await gate.run(async () => {
         if (engine.running) await engine.running;
         await engine.sync();
+        memoryDirty = false;
       });
     } catch (error) { report(error.message, 'error'); }
   }));

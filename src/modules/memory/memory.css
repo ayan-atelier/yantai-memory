@@ -129,6 +129,22 @@
   border-radius: var(--yt-radius);
   background: var(--yt-panel);
 }
+.yt-guard-box,
+.yt-vault-box {
+  margin: 12px 0;
+  border-color: var(--yt-accent);
+  background: var(--yt-accent-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.yt-guard-text {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--yt-text);
+  overflow-wrap: anywhere;
+}
 .yt-model-row {
   display: flex;
   gap: 8px;
