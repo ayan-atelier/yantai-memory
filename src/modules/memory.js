@@ -25,7 +25,6 @@ export const MEMORY_DEFAULTS = Object.freeze({
   extraBody: '{}',
   preset: DEFAULT_PRESET,
   autoEnableNewChats: true,
-  autoHideArchived: false,
   assistantAutoCompress: false,
   assistantWarnTokens: 8000,
   assistantAutoTokens: 12000,
@@ -127,7 +126,6 @@ export function validateConfig(candidate) {
   if (!['main', 'st_mate_aux', 'custom'].includes(next.apiMode)) throw new Error('请选择有效的记忆连接方式。');
   next.mainModelOverride = String(next.mainModelOverride || '').trim().slice(0, 200);
   next.autoEnableNewChats = next.autoEnableNewChats !== false;
-  next.autoHideArchived = Boolean(next.autoHideArchived);
   next.assistantAutoCompress = Boolean(next.assistantAutoCompress);
   for (const [key, [label, min, max]] of Object.entries(NUMERIC_FIELDS)) {
     next[key] = Number(next[key]);
@@ -224,57 +222,6 @@ export async function createMemory({ host, store, ui }) {
     return { ...chat, messages };
   };
 
-  let chatsBridgePromise = null;
-  async function autoHideOldMessages(rounds, through, cfg = config()) {
-    const keepRounds = Math.max(1, Number(cfg?.historyRounds) || 5);
-    const hideRoundCount = Math.min(Number(through) || 0, Math.max(0, (rounds?.length || 0) - keepRounds));
-    if (hideRoundCount <= 0) return 0;
-    const liveChat = host.currentChat()?.messages;
-    if (!Array.isArray(liveChat) || !liveChat.length) return 0;
-
-    // Preserve message 0 (greeting card often hosts global <style> blocks in themed cards)
-    const targetIds = rounds
-      .slice(0, hideRoundCount)
-      .flatMap(r => r.source.map(s => s.id))
-      .filter(id => Number.isInteger(id) && id >= 1 && liveChat[id] && !liveChat[id].is_system)
-      .sort((a, b) => a - b);
-
-    if (!targetIds.length) return 0;
-
-    const ranges = [];
-    for (const id of targetIds) {
-      const last = ranges.at(-1);
-      if (last && id === last[1] + 1) last[1] = id;
-      else ranges.push([id, id]);
-    }
-
-    let usedNative = false;
-    try {
-      chatsBridgePromise ||= import('/scripts/chats.js');
-      const chatsMod = await chatsBridgePromise;
-      if (typeof chatsMod?.hideChatMessageRange === 'function') {
-        for (const [start, end] of ranges) {
-          await chatsMod.hideChatMessageRange(start, end, false);
-        }
-        usedNative = true;
-      }
-    } catch {
-      usedNative = false;
-    }
-
-    if (!usedNative) {
-      for (const id of targetIds) {
-        if (!liveChat[id]) continue;
-        liveChat[id].is_system = true;
-        globalThis.document?.querySelector?.(`.mes[mesid="${id}"]`)?.setAttribute?.('is_system', 'true');
-      }
-      const ctx = host.context();
-      if (typeof ctx?.saveChatConditional === 'function') await ctx.saveChatConditional();
-      else if (typeof ctx?.saveChat === 'function') await ctx.saveChat();
-    }
-    return targetIds.length;
-  }
-
   function report(message, kind = 'info') {
     statusText = String(message);
     statusKind = kind;
@@ -292,7 +239,7 @@ export async function createMemory({ host, store, ui }) {
 
   const storage = createStorage(host, config, { context: capture, alive: () => alive, isDirty: () => memoryDirty });
   const api = createApi(host);
-  const adapter = { ...storage, ...api, autoHideOldMessages, context: capture, key: () => capture()?.key, isGenerating: () => !!generation };
+  const adapter = { ...storage, ...api, context: capture, key: () => capture()?.key, isGenerating: () => !!generation };
   const engine = new Engine(adapter, config, report);
   const gate = createSyncGate({
     engine,
@@ -737,7 +684,7 @@ export async function createMemory({ host, store, ui }) {
         ? `聊天世界书：首次满轮整理时将建立「${storage.previewBookName(chat)}」（0 轮看卡不空建世界书）`
         : '聊天世界书：首次满轮整理时自动建立（0 轮看卡不空建世界书，不改动角色世界书）';
     metaList.append(
-      node('p', `节奏：每 ${cfg.frequency} 轮自动整理 · 每满 ${cfg.chapterSpan} 轮封存一卷（永不重洗旧卷） · 保留最近 ${cfg.historyRounds} 轮对话原文${cfg.autoHideArchived ? ' · 归档后自动 /hide 旧楼层' : '（支持手动 /hide 不丢记忆）'}`, 'yt-muted'),
+      node('p', `节奏：每 ${cfg.frequency} 轮自动整理 · 每满 ${cfg.chapterSpan} 轮封存一卷（永不重洗旧卷） · 保留最近 ${cfg.historyRounds} 轮对话原文（兼容手动 /hide 不丢记忆）`, 'yt-muted'),
       node('p', bookStatusLine, 'yt-muted'),
       node('p', injectionText, 'yt-muted yt-memory-injection'),
     );
@@ -1051,11 +998,7 @@ export async function createMemory({ host, store, ui }) {
       draftSettings = { ...(draftSettings || {}), autoEnableNewChats: autoEnable.input.checked };
     });
     controls.autoEnableNewChats = autoEnable.input;
-    const autoHideToggle = toggle('归档后自动隐藏旧楼层（自动 /hide 前序已记消息，缓解手机端长对话卡顿）', !!current.autoHideArchived, () => {
-      draftSettings = { ...(draftSettings || {}), autoHideArchived: autoHideToggle.input.checked };
-    });
-    controls.autoHideArchived = autoHideToggle.input;
-    cadenceSec.append(autoEnable.wrap, autoHideToggle.wrap);
+    cadenceSec.append(autoEnable.wrap);
 
     const primaryKeys = ['frequency', 'batchSize', 'chapterSpan', 'historyRounds'];
     const primaryGrid = node('div', undefined, 'yt-grid');
@@ -1082,7 +1025,6 @@ export async function createMemory({ host, store, ui }) {
         extraBody: controls.extraBody.value.trim(),
         preset: controls.preset.value.trim(),
         autoEnableNewChats: controls.autoEnableNewChats.checked,
-        autoHideArchived: controls.autoHideArchived.checked,
         assistantAutoCompress: controls.assistantAutoCompress.checked,
       };
       for (const key of Object.keys(NUMERIC_FIELDS)) next[key] = controls[key].value;
@@ -1095,21 +1037,13 @@ export async function createMemory({ host, store, ui }) {
       draftSettings = null;
       draftPreset = null;
       const chat = capture();
-      let hiddenNow = 0;
       if (chat) {
         await engine.serial(async () => {
           const loaded = await storage.load(chat);
           if (loaded.owned) await storage.save(chat, loaded.state, loaded, () => capture()?.key === chat.key);
-          if (validated.autoHideArchived && loaded.state.enabled) {
-            const rounds = C.roundsFrom(chat.messages, true);
-            const through = C.materialize(loaded.state).through;
-            if (through > 0) {
-              try { hiddenNow = await autoHideOldMessages(rounds, through, validated); } catch { hiddenNow = 0; }
-            }
-          }
         });
       }
-      report(hiddenNow > 0 ? `配置已保存并立即生效（已顺手自动隐藏前序 ${hiddenNow} 楼已记对话）。` : '配置已保存并立即生效。', 'success');
+      report('配置已保存并立即生效。', 'success');
       await refresh({ force: true });
     }), true);
 

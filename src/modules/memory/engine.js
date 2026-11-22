@@ -183,9 +183,6 @@ const JDMEngine = (() => {
             const next = { ...state, history: [...state.history, journal], compact: nextCompact, pausedByUser: false, lastError: '' };
             await this.a.save(context, next, fresh, samePrefix);
           });
-          if (config.autoHideArchived) {
-            try { await this.a.autoHideOldMessages?.(rounds, memory.through + count, config); } catch { /* ignore UI hide error */ }
-          }
           this.report(`已自动跳过 ${count} 轮独立番外，不计入主线记忆。`);
           return true;
         }
@@ -248,17 +245,11 @@ const JDMEngine = (() => {
 
         this.retryAfterFailure.delete(context.key);
         const newThrough = memory.through + batch.length;
-        let hiddenCount = 0;
-        if (config.autoHideArchived) {
-          try { hiddenCount = Number(await this.a.autoHideOldMessages?.(rounds, newThrough, config)) || 0; }
-          catch { hiddenCount = 0; }
-        }
         const sealedNotice = delta.sealedChapter
           ? `（第 ${delta.sealedChapter.index} 卷「第 ${delta.sealedChapter.fromRound}—${delta.sealedChapter.toRound} 轮」已封存锁定）`
           : '';
-        const hideNotice = hiddenCount > 0 ? `已自动隐藏前序 ${hiddenCount} 楼旧对话。` : '';
         this.report(
-          `已整理至第 ${newThrough} 轮${sealedNotice}。${hideNotice}${pending.length > batch.length ? `尚有 ${pending.length - batch.length} 轮积压待补。` : '后续对话将自动携带最新记忆。'}`,
+          `已整理至第 ${newThrough} 轮${sealedNotice}。${pending.length > batch.length ? `尚有 ${pending.length - batch.length} 轮积压待补。` : '后续对话将自动携带最新记忆。'}`,
           'success',
         );
         return true;

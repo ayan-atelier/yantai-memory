@@ -1,7 +1,7 @@
-/* 砚台 · 叙事记忆核心确定性引擎（v0.4.2 · 隐藏楼层穿透兼容 & 铁打防丢保险箱） */
+/* 砚台 · 叙事记忆核心确定性引擎（v0.4.3 · 隐藏楼层穿透兼容 & 铁打防丢保险箱） */
 const JDMCore = (() => {
   'use strict';
-  const VERSION = '0.4.2';
+  const VERSION = '0.4.3';
   const DEFAULT_CHAPTER_SPAN = 24;
   const DEFAULT_MAX_AUTO_TRIM = 3;
   const NON_STORY_TYPES = new Set([

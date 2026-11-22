@@ -157,11 +157,8 @@ test('end-to-end /hide 1-50 reproduction: hiding floors NEVER erases worldbook m
       throw new Error(`unexpected: ${path}`);
     },
   };
-  let autoHideArchived = false;
-  let autoHiddenCount = 0;
   const cfg = () => ({
     autoEnableNewChats: true,
-    autoHideArchived,
     frequency: 3,
     batchSize: 30,
     chapterSpan: 24,
@@ -174,21 +171,6 @@ test('end-to-end /hide 1-50 reproduction: hiding floors NEVER erases worldbook m
   const storage = createStorage(host, cfg, { context: () => chat, alive: () => true, cacheBridge: { worldInfoCache: new Map() } });
   const adapter = {
     ...storage,
-    async autoHideOldMessages(rounds, through, c) {
-      const keep = Math.max(1, Number(c.historyRounds) || 5);
-      const count = Math.min(through, Math.max(0, rounds.length - keep));
-      let n = 0;
-      for (const r of rounds.slice(0, count)) {
-        for (const s of r.source) {
-          if (s.id >= 1 && !chat.messages[s.id].is_system) {
-            chat.messages[s.id].is_system = true;
-            n++;
-          }
-        }
-      }
-      autoHiddenCount += n;
-      return n;
-    },
     context: () => chat,
     key: () => chat.key,
     isGenerating: () => false,
@@ -246,8 +228,7 @@ test('end-to-end /hide 1-50 reproduction: hiding floors NEVER erases worldbook m
   assert.equal(Boolean(plan.prepared[2].extra[HISTORY_IGNORE]), true);
   assert.equal(Boolean(plan.prepared[3].extra[HISTORY_IGNORE]), false);
 
-  // Step 4: Add Rounds 25-27, hide Round 25 BEFORE summarizing, and enable `autoHideArchived = true`!
-  autoHideArchived = true;
+  // Step 4: Add Rounds 25-27, hide Round 25 BEFORE summarizing!
   for (let r = 25; r <= 27; r++) {
     const hidden = r === 25;
     chat.messages.push(
@@ -258,8 +239,6 @@ test('end-to-end /hide 1-50 reproduction: hiding floors NEVER erases worldbook m
   assert.equal(await engine.run(false), true, 'Summarizes Rounds 25-27 even when Round 25 was already hidden!');
   snap = await engine.sync();
   assert.equal(snap.memory.through, 27);
-  assert.ok(autoHiddenCount > 0, 'autoHideArchived automatically hides newly eligible old floors');
-  assert.equal(chat.messages[0].is_system, false, 'Message 0 greeting remains unhidden to preserve card CSS');
 
   // Step 5: Simulate catastrophic user mistake (deleting 20 rounds at once -> only 3 rounds left in chat)
   chat.messages.splice(7); // Leave greeting + 3 rounds (Rounds 1-3)
