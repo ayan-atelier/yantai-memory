@@ -60,6 +60,28 @@
   font-weight: 600;
   overflow-wrap: anywhere;
 }
+.yt-rename-trigger.yt-button {
+  min-height: 24px;
+  padding: 2px 9px;
+  font-size: 11.5px;
+  border-radius: 999px;
+  color: var(--yt-muted);
+}
+.yt-rename-trigger.yt-button:hover {
+  color: var(--yt-text);
+  border-color: var(--yt-accent);
+}
+.yt-rename-box {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.yt-rename-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
 .yt-pill {
   display: inline-flex;
   align-items: center;

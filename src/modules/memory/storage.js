@@ -5,6 +5,55 @@ export const TAG = 'yantai_narrative_memory_v1';
 export const LEGACY_TAG = 'jingdu_narrative_memory_v1';
 export const AUTO_ENABLE_OPT_OUT = 'yantai_memory_auto_enable_opt_out';
 export const AUTO_ENABLE_OPT_IN = 'yantai_memory_auto_enable_opt_in';
+export const MEMORY_LABEL_KEY = 'yantai_memory_label';
+
+export function sanitizeBookSegment(value, maxLen = 28) {
+  return String(value ?? '')
+    .replace(/[\r\n\t\\/:*?"<>|]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLen)
+    .trim();
+}
+
+export function bookshelfAliasKeyForChat(chat) {
+  if (!chat?.avatar || !chat?.id || chat?.isGroup) return '';
+  const stem = String(chat.id).replace(/\.jsonl$/i, '');
+  return stem ? JSON.stringify([`char:${chat.avatar}`, stem]) : '';
+}
+
+export function resolveBranchLabel(chat) {
+  const meta = chat?.context?.chatMetadata || chat?.metadata;
+  const explicit = sanitizeBookSegment(meta?.[MEMORY_LABEL_KEY], 36);
+  if (explicit) return explicit;
+  const aKey = bookshelfAliasKeyForChat(chat);
+  if (!aKey) return '';
+  const aliases = chat?.context?.extensionSettings?.jingdu_bookshelf?.aliases;
+  return sanitizeBookSegment(aliases?.[aKey], 36);
+}
+
+function formatCompactChatStamp(chatId) {
+  const raw = String(chatId || '').replace(/\.jsonl$/i, '');
+  const match = raw.match(/(?:20\d{2}-)?(\d{2})-(\d{2})@(\d{2})h(\d{2})m/i);
+  if (match) return `${match[1]}${match[2]}_${match[3]}${match[4]}`;
+  const dateOnly = raw.match(/(?:20\d{2}-)?(\d{2})-(\d{2})/);
+  if (dateOnly) return `${dateOnly[1]}${dateOnly[2]}`;
+  const clean = sanitizeBookSegment(raw, 12);
+  return clean || C.uid().slice(0, 6);
+}
+
+export function buildMemoryBookName(chat, { label, existingNames = [] } = {}) {
+  const charPart = sanitizeBookSegment(chat?.name || '聊天', 20) || '聊天';
+  const branchPart = label !== undefined ? sanitizeBookSegment(label, 32) : resolveBranchLabel(chat);
+  let candidate = branchPart
+    ? `砚台记忆-${charPart}-${branchPart}`
+    : `砚台记忆-${charPart}-${formatCompactChatStamp(chat?.id)}-${C.uid().slice(-4)}`;
+  const taken = new Set((existingNames || []).map(x => String(x || '').trim()).filter(Boolean));
+  if (taken.has(candidate)) {
+    candidate = `${candidate}-${C.uid().slice(-4)}`;
+  }
+  return candidate;
+}
 
 export const tagOf = entry => entry?.extra?.[TAG];
 export const legacyTagOf = entry => entry?.extra?.[LEGACY_TAG];
@@ -194,7 +243,7 @@ export function createStorage(host, configuration, runtime = {}) {
     // AND latches `AUTO_ENABLE_OPT_IN` in chat_metadata so even longer frequencies or retries stay enabled!
     // Meanwhile, ancient unbound archives (> max(freq, 5) rounds that were never latched) are not unexpectedly auto-run.
     const eligibleNewChat = autoLatched || completedRounds <= Math.max(freq, 5);
-    const autoEnabled = !stored && !book && !legacy && !autoDisabled && eligibleNewChat && cfg.autoEnableNewChats !== false;
+    const autoEnabled = !stored && !book && !legacy && !autoDisabled && (autoLatched || (eligibleNewChat && cfg.autoEnableNewChats !== false));
     if (autoEnabled && metadata && typeof metadata === 'object' && !metadata[AUTO_ENABLE_OPT_IN]) {
       metadata[AUTO_ENABLE_OPT_IN] = true;
     }
@@ -211,6 +260,7 @@ export function createStorage(host, configuration, runtime = {}) {
       legacy,
       autoEnabled,
       autoDisabled,
+      branchLabel: resolveBranchLabel(captured),
       charBooks: characterWorldbooks(captured),
     };
     confirmed.set(captured.key, result);
@@ -225,6 +275,28 @@ export function createStorage(host, configuration, runtime = {}) {
     };
     ensureCurrent();
     const needsNew = !loaded.owned;
+    // Lazy worldbook creation: when a chat has no bound worldbook yet and zero archived history/note,
+    // toggling enabled ON or OFF only persists preference in chat_metadata—never creating empty worldbooks!
+    if (needsNew && !loaded.book && !nextState.history.length && !nextState.note) {
+      if (!nextState.enabled) {
+        if (loaded.autoEnabled || loaded.autoDisabled || chatMetadata(captured)?.[AUTO_ENABLE_OPT_IN]) {
+          await setAutoEnableOptOut(captured, true, guard);
+        }
+      } else {
+        await setAutoEnableOptOut(captured, false, guard);
+      }
+      const lazyState = { ...C.clone(nextState), owner: captured.key };
+      confirmed.set(captured.key, {
+        ...loaded,
+        book: '',
+        state: lazyState,
+        owned: false,
+        autoEnabled: Boolean(nextState.enabled),
+        autoDisabled: !nextState.enabled,
+        branchLabel: resolveBranchLabel(captured),
+      });
+      return lazyState;
+    }
     if (needsNew && !nextState.enabled && !nextState.history.length && !nextState.note) {
       if (loaded.autoEnabled || loaded.autoDisabled || chatMetadata(captured)?.[AUTO_ENABLE_OPT_IN]) {
         await setAutoEnableOptOut(captured, true, guard);
@@ -249,8 +321,11 @@ export function createStorage(host, configuration, runtime = {}) {
     let book = loaded.book;
     let source = base;
     if (needsNew) {
-      const name = String(captured.name || '聊天').replace(/[\\/:*?"<>|]/g, '').slice(0, 24) || '聊天';
-      book = `砚台记忆-${name}-${C.uid()}`;
+      const existingNames = [
+        ...(Array.isArray(host.context()?.worldNames) ? host.context().worldNames : []),
+        ...(bridge.worldInfoCache?.keys ? Array.from(bridge.worldInfoCache.keys()) : []),
+      ];
+      book = buildMemoryBookName(captured, { existingNames });
       source = {
         ...base,
         entries: Object.fromEntries(
@@ -309,6 +384,7 @@ export function createStorage(host, configuration, runtime = {}) {
       fork: false,
       owned: true,
       originalRevision: state.revision,
+      branchLabel: resolveBranchLabel(captured),
       charBooks: characterWorldbooks(captured),
     });
     const ctx = host.context();
@@ -321,6 +397,166 @@ export function createStorage(host, configuration, runtime = {}) {
       catch { host.toast?.('记忆已保存，但世界书编辑器未刷新；请重新选择这本书后再编辑。', 'warning'); }
     }
     return state;
+  }
+
+  async function renameBranchAndBook(captured, rawInput, guard = () => true) {
+    check(captured, guard);
+    const loaded = await load(captured);
+    check(captured, guard);
+
+    const active = current();
+    const metadata = chatMetadata(active);
+    if (!metadata || typeof metadata !== 'object') {
+      throw new Error('当前酒馆缺少聊天元数据，无法保存支线名称。');
+    }
+
+    const charPart = sanitizeBookSegment(captured.name || '聊天', 20) || '聊天';
+    const trimmed = sanitizeBookSegment(rawInput, 56);
+    const aKey = bookshelfAliasKeyForChat(captured);
+    const shelfAliases = active?.context?.extensionSettings?.jingdu_bookshelf?.aliases;
+
+    if (!trimmed) {
+      delete metadata[MEMORY_LABEL_KEY];
+      if (aKey && shelfAliases && typeof shelfAliases === 'object') {
+        delete shelfAliases[aKey];
+        active.context.saveSettingsDebounced?.();
+      }
+      await host.saveMetadata();
+      check(captured, guard);
+      const nextView = { ...loaded, branchLabel: '' };
+      confirmed.set(captured.key, nextView);
+      return { book: loaded.book || '', previewBook: '', branchLabel: '', renamedBook: false };
+    }
+
+    let branchLabel = '';
+    let targetBook = '';
+    if (trimmed.startsWith('砚台记忆-')) {
+      targetBook = trimmed;
+      const stdPrefix = `砚台记忆-${charPart}-`;
+      branchLabel = trimmed.startsWith(stdPrefix)
+        ? sanitizeBookSegment(trimmed.slice(stdPrefix.length), 36)
+        : sanitizeBookSegment(trimmed.slice('砚台记忆-'.length), 36);
+    } else {
+      branchLabel = sanitizeBookSegment(trimmed, 36);
+      targetBook = `砚台记忆-${charPart}-${branchLabel}`;
+    }
+
+    const syncShelfAlias = () => {
+      if (aKey && shelfAliases && typeof shelfAliases === 'object') {
+        if (branchLabel) shelfAliases[aKey] = branchLabel;
+        else delete shelfAliases[aKey];
+        active.context.saveSettingsDebounced?.();
+      }
+    };
+
+    if (!loaded.owned || !loaded.book) {
+      metadata[MEMORY_LABEL_KEY] = branchLabel;
+      syncShelfAlias();
+      await host.saveMetadata();
+      check(captured, guard);
+      const nextView = { ...loaded, branchLabel };
+      confirmed.set(captured.key, nextView);
+      return { book: loaded.book || '', previewBook: targetBook, branchLabel, renamedBook: false };
+    }
+
+    const oldBook = loaded.book;
+    if (targetBook === oldBook) {
+      metadata[MEMORY_LABEL_KEY] = branchLabel;
+      syncShelfAlias();
+      await host.saveMetadata();
+      check(captured, guard);
+      const nextView = { ...loaded, branchLabel };
+      confirmed.set(captured.key, nextView);
+      return { book: oldBook, previewBook: oldBook, branchLabel, renamedBook: false };
+    }
+
+    const bridge = await nativeBridge();
+    check(captured, guard);
+    const existingNames = new Set([
+      ...(Array.isArray(host.context()?.worldNames) ? host.context().worldNames : []),
+      ...(bridge.worldInfoCache?.keys ? Array.from(bridge.worldInfoCache.keys()) : []),
+    ]);
+    if (existingNames.has(targetBook)) {
+      throw new Error(`已存在同名世界书「${targetBook}」，请换一个区分度更高的名字。`);
+    }
+
+    const base = await readBook(oldBook);
+    check(captured, guard);
+    if ((parseState(base)?.revision || '') !== loaded.originalRevision) {
+      throw new Error('记忆世界书已被其他操作更新，请先刷新面板后再改名。');
+    }
+
+    const response = await host.request('/api/worldinfo/edit', { body: { name: targetBook, data: base } });
+    if (response?.error || response?.ok === false) {
+      throw new Error('新名称记忆世界书写入失败，原绑定未变更。');
+    }
+    const durable = await readBook(targetBook);
+    if ((parseState(durable)?.revision || '') !== loaded.originalRevision) {
+      throw new Error('新名称记忆世界书校验失败，原绑定未变更。');
+    }
+    bridge.worldInfoCache.set(targetBook, C.clone(durable));
+    check(captured, guard);
+
+    const priorBook = metadata.world_info;
+    const priorLabel = metadata[MEMORY_LABEL_KEY];
+    metadata.world_info = targetBook;
+    metadata[MEMORY_LABEL_KEY] = branchLabel;
+    try {
+      await host.saveMetadata();
+      check(captured, guard);
+      const savedChat = await host.request('/api/chats/get', {
+        body: { ch_name: captured.name, file_name: captured.id, avatar_url: captured.avatar },
+        cache: 'no-cache',
+      });
+      if (!Array.isArray(savedChat) || savedChat[0]?.chat_metadata?.world_info !== targetBook) {
+        throw new Error('聊天世界书新绑定尚未保存成功，请稍后重试。');
+      }
+    } catch (error) {
+      if (current()?.key === captured.key && metadata.world_info === targetBook) {
+        metadata.world_info = priorBook;
+        if (priorLabel === undefined) delete metadata[MEMORY_LABEL_KEY];
+        else metadata[MEMORY_LABEL_KEY] = priorLabel;
+      }
+      throw error;
+    }
+
+    syncShelfAlias();
+
+    if (!characterWorldbooks(captured).includes(oldBook)) {
+      let removedByBridge = false;
+      if (typeof bridge.deleteWorldInfo === 'function') {
+        try { removedByBridge = Boolean(await bridge.deleteWorldInfo(oldBook)); }
+        catch { removedByBridge = false; }
+      }
+      if (!removedByBridge) {
+        try { await host.request('/api/worldinfo/delete', { body: { name: oldBook } }); }
+        catch { /* ignore cleanup failure; new binding is already safe */ }
+      }
+      bridge.worldInfoCache.delete?.(oldBook);
+      const wNames = host.context()?.worldNames;
+      if (Array.isArray(wNames)) {
+        const oldIdx = wNames.indexOf(oldBook);
+        if (oldIdx >= 0) wNames.splice(oldIdx, 1);
+      }
+    }
+
+    const ctx = host.context();
+    if (Array.isArray(ctx?.worldNames) && !ctx.worldNames.includes(targetBook)) {
+      ctx.worldNames.push(targetBook);
+    }
+    await ctx?.updateWorldInfoList?.();
+    if (ctx?.eventTypes?.WORLDINFO_UPDATED) {
+      await ctx.eventSource?.emit?.(ctx.eventTypes.WORLDINFO_UPDATED, targetBook, C.clone(durable));
+    }
+
+    const updatedView = {
+      ...loaded,
+      book: targetBook,
+      data: durable,
+      branchLabel,
+    };
+    confirmed.set(captured.key, updatedView);
+    return { book: targetBook, oldBook, previewBook: targetBook, branchLabel, renamedBook: true };
   }
 
   function filterLore(lores) {
@@ -349,6 +585,8 @@ export function createStorage(host, configuration, runtime = {}) {
   return {
     load,
     save,
+    renameBranchAndBook,
+    previewBookName: chat => buildMemoryBookName(chat),
     readBook,
     confirmed,
     allowCreate: key => consent.add(key),

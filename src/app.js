@@ -6,7 +6,7 @@ import { createMemory } from './modules/memory.js';
 
 export async function createMemoryApp() {
   const host = createHost(), store = createStore(host);
-  const panel = createPanel('yt-memory-dialog', '叙事记忆', { version: '0.4.0' });
+  const panel = createPanel('yt-memory-dialog', '叙事记忆', { version: '0.4.1' });
   const controlKey = Symbol.for('yantai.control.registry.v1');
   let memory = null, alive = true, ownerWork = Promise.resolve(), reconciling = 0;
 
@@ -36,7 +36,7 @@ export async function createMemoryApp() {
   const registry = globalThis[controlKey] || (globalThis[controlKey] = { version: 1, modules: new Map() });
   if (!(registry.modules instanceof Map)) registry.modules = new Map();
   const controlModule = {
-    id: 'yantai-memory', label: '叙事记忆', version: '0.4.0', schemaVersion: 1, namespace: 'yantai',
+    id: 'yantai-memory', label: '叙事记忆', version: '0.4.1', schemaVersion: 1, namespace: 'yantai',
     inspect() {
       const status = memory?.status?.() || syncBridge.status();
       const enabled = moduleEnabled();

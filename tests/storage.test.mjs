@@ -32,6 +32,10 @@ function harness({ book = '', data = { entries: {} }, autoEnableNewChats = true,
         worldBooks.set(options.body.name, structuredClone(options.body.data));
         return { ok: true };
       }
+      if (path === '/api/worldinfo/delete') {
+        worldBooks.delete(options.body.name);
+        return { ok: true };
+      }
       if (path === '/api/chats/get') return [{ chat_metadata: structuredClone(metadata) }];
       throw new Error(`unexpected request: ${path}`);
     },
@@ -123,4 +127,45 @@ test('stored states, fork copies, and global autoEnableNewChats=false behave det
   const disabledGlobal = harness({ autoEnableNewChats: false });
   const disabledLoaded = await disabledGlobal.storage.load(disabledGlobal.chat);
   assert.equal(disabledLoaded.state.enabled, false);
+});
+
+test('toggling enabled ON/OFF on 0-round chat never creates empty worldbook until first summary or note', async () => {
+  const { chat, storage, worldBooks } = harness({ autoEnableNewChats: false });
+  const r0 = await storage.load(chat);
+  assert.equal(r0.state.enabled, false);
+  assert.equal(worldBooks.size, 0);
+
+  // Manually enabling on Round 0 only latches chat_metadata, zero worldbook files created!
+  await storage.save(chat, { ...r0.state, enabled: true }, r0);
+  assert.equal(worldBooks.size, 0, 'Must NOT create empty worldbook on Round 0 toggle!');
+  assert.equal(chat.metadata[AUTO_ENABLE_OPT_IN], true);
+
+  const r0Reloaded = await storage.load(chat);
+  assert.equal(r0Reloaded.state.enabled, true);
+  assert.equal(r0Reloaded.owned, false);
+
+  // Pre-naming branch before Round 3 still keeps worldBooks empty
+  chat.context.extensionSettings.jingdu_bookshelf = { aliases: {} };
+  const preNamed = await storage.renameBranchAndBook(chat, '黑狼犬AU线');
+  assert.equal(preNamed.renamedBook, false);
+  assert.equal(preNamed.previewBook, '砚台记忆-测试角色-黑狼犬AU线');
+  assert.equal(worldBooks.size, 0);
+
+  // Once first batch (or note) is saved, worldbook is created with the named branch!
+  const withNote = await storage.load(chat);
+  await storage.save(chat, { ...withNote.state, note: '记住她在雪夜递了伞' }, withNote);
+  assert.equal(worldBooks.has('砚台记忆-测试角色-黑狼犬AU线'), true);
+  assert.equal(chat.metadata.world_info, '砚台记忆-测试角色-黑狼犬AU线');
+
+  // Renaming existing bound memory worldbook migrates entries & cleans up old book
+  const renamed = await storage.renameBranchAndBook(chat, '开场白3·雪夜');
+  assert.equal(renamed.renamedBook, true);
+  assert.equal(renamed.book, '砚台记忆-测试角色-开场白3·雪夜');
+  assert.equal(chat.metadata.world_info, '砚台记忆-测试角色-开场白3·雪夜');
+  assert.equal(worldBooks.has('砚台记忆-测试角色-开场白3·雪夜'), true);
+  assert.equal(worldBooks.has('砚台记忆-测试角色-黑狼犬AU线'), false);
+  assert.equal(
+    chat.context.extensionSettings.jingdu_bookshelf.aliases[JSON.stringify(['char:char.png', 'chat-id'])],
+    '开场白3·雪夜',
+  );
 });

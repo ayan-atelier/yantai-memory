@@ -189,6 +189,7 @@ export async function createMemory({ host, store, ui }) {
   let statusText = '新聊天自动启用记忆，默认每 3 轮归档一次。', statusKind = 'info', injectionText = '等待下一次生成校验注入状态';
   let allRows = false, draftSettings = null, draftPreset = null;
   let historyPlan = null;
+  let renameOpenKey = '', renameDraft = '';
   const noteDrafts = new Map(), cleanups = [];
 
   const capture = () => {
@@ -459,7 +460,26 @@ export async function createMemory({ host, store, ui }) {
 
     const topBar = node('div', undefined, 'yt-chat-bar');
     const titleGroup = node('div', undefined, 'yt-chat-meta');
-    titleGroup.append(node('strong', `${chat.name || '当前角色'} · ${chat.id}`, 'yt-memory-chat-name'));
+    const branchLabel = loaded.branchLabel || '';
+    const displaySub = branchLabel || chat.id;
+    const titleNode = node('strong', `${chat.name || '当前角色'} · ${displaySub}`, 'yt-memory-chat-name');
+    if (branchLabel && branchLabel !== chat.id) {
+      titleNode.title = `原存档文件：${chat.id}`;
+    }
+    const renameToggleBtn = button(renameOpenKey === chat.key ? '收起改名' : (branchLabel || loaded.owned ? '改名' : '命名支线'), () => {
+      if (renameOpenKey === chat.key) {
+        renameOpenKey = '';
+        renameDraft = '';
+      } else {
+        renameOpenKey = chat.key;
+        renameDraft = branchLabel || (loaded.owned && loaded.book
+          ? loaded.book.replace(new RegExp(`^砚台记忆-${String(chat.name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-`), '')
+          : '');
+      }
+      void refresh({ force: true });
+    });
+    renameToggleBtn.classList.add('yt-rename-trigger');
+    titleGroup.append(titleNode, renameToggleBtn);
     if (loaded.charBooks?.length) {
       titleGroup.append(node('span', `角色世界书：${loaded.charBooks.join('、')}（并存生效）`, 'yt-pill'));
     }
@@ -478,6 +498,63 @@ export async function createMemory({ host, store, ui }) {
     }));
     topBar.append(titleGroup, enabledToggle.wrap);
     overview.append(topBar);
+
+    if (renameOpenKey === chat.key) {
+      const renameBox = node('div', undefined, 'yt-subpanel yt-rename-box');
+      const charPart = String(chat.name || '聊天').replace(/[\\/:*?"<>|]/g, '').trim().slice(0, 20) || '聊天';
+      const renameField = inputField('当前存档支线名（与角色书架显示名及记忆世界书名联动）', renameDraft);
+      renameField.input.placeholder = '例如：开场白3·雪夜 / 黑狼犬AU线（留空恢复原名）';
+      renameField.input.maxLength = 48;
+      const hintLine = node('p', '', 'yt-muted yt-rename-hint');
+      const updateRenameHint = val => {
+        const v = String(val || '').replace(/[\\/:*?"<>|]/g, '').trim();
+        if (!v) {
+          hintLine.textContent = loaded.owned && loaded.book
+            ? `留空保存将恢复原存档文件名显示，已生成的记忆世界书「${loaded.book}」保持不变。`
+            : '输入易认的支线名后，首次满轮整理时会自动按该名称建立记忆世界书。';
+          return;
+        }
+        const preview = v.startsWith('砚台记忆-') ? v : `砚台记忆-${charPart}-${v}`;
+        hintLine.textContent = loaded.owned && loaded.book
+          ? `保存后将把绑定记忆世界书重命名为「${preview}」（自动迁移条目并清理旧名，不丢进度）。`
+          : `当前尚未生成世界书文件；保存后首次满轮整理时将自动建立为「${preview}」。`;
+      };
+      updateRenameHint(renameDraft);
+      renameField.input.addEventListener('input', () => {
+        renameDraft = renameField.input.value;
+        updateRenameHint(renameDraft);
+      });
+      const submitRename = action(async () => {
+        if (engine.running || generation) throw new Error('主回复或记忆整理进行中，请稍候再改名。');
+        const result = await engine.serial(() => storage.renameBranchAndBook(chat, renameField.input.value, () => capture()?.key === chat.key));
+        renameOpenKey = '';
+        renameDraft = '';
+        if (result.renamedBook) {
+          report(`已重命名支线与记忆世界书为「${result.book}」。`, 'success');
+        } else if (result.branchLabel) {
+          report(`已保存支线名「${result.branchLabel}」，首次整理时将建立世界书「${result.previewBook}」。`, 'success');
+        } else {
+          report('已恢复默认存档显示名。', 'info');
+        }
+        await refresh({ force: true });
+      });
+      renameField.input.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.isComposing) {
+          e.preventDefault();
+          void submitRename(e);
+        }
+      });
+      const renameActions = node('div', undefined, 'yt-inline');
+      const saveRenameBtn = button('保存名称', submitRename, true);
+      const cancelRenameBtn = button('取消', () => {
+        renameOpenKey = '';
+        renameDraft = '';
+        void refresh({ force: true });
+      });
+      renameActions.append(saveRenameBtn, cancelRenameBtn);
+      renameBox.append(renameField.wrap, hintLine, renameActions);
+      overview.append(renameBox);
+    }
 
     if (loaded.fork) overview.append(node('p', '检测到分支存档副本，已默认暂停记忆；勾选上方开关可为此分支建立独立记忆书。', 'yt-notice'));
     if (loaded.legacy) overview.append(node('p', '检测到旧版静读记忆，可在“整理配置 → 备份与导入导出”中迁移接管。', 'yt-notice'));
@@ -534,9 +611,14 @@ export async function createMemory({ host, store, ui }) {
     }
 
     const metaList = node('div', undefined, 'yt-meta-lines');
+    const bookStatusLine = loaded.book
+      ? `绑定聊天世界书：${loaded.book}`
+      : branchLabel
+        ? `聊天世界书：首次满轮整理时将建立「${storage.previewBookName(chat)}」（0 轮看卡不空建世界书）`
+        : '聊天世界书：首次满轮整理时自动建立（0 轮看卡不空建世界书，不改动角色世界书）';
     metaList.append(
       node('p', `节奏：每 ${cfg.frequency} 轮自动整理 · 每满 ${cfg.chapterSpan} 轮封存一卷（永不重洗旧卷） · 保留最近 ${cfg.historyRounds} 轮对话原文`, 'yt-muted'),
-      node('p', loaded.book ? `绑定聊天世界书：${loaded.book}` : '聊天世界书：首次满轮整理时自动建立（不改动角色世界书）', 'yt-muted'),
+      node('p', bookStatusLine, 'yt-muted'),
       node('p', injectionText, 'yt-muted yt-memory-injection'),
     );
     overview.append(metaList);
@@ -1101,6 +1183,8 @@ export async function createMemory({ host, store, ui }) {
     memoryDirty = true;
     assistantAnswer = '';
     historyPlan = null;
+    renameOpenKey = '';
+    renameDraft = '';
     gate.cancelScheduled();
     generation = null;
     if (gate.paused()) { needsSyncAfterPause = true; return; }

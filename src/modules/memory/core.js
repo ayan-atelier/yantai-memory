@@ -1,7 +1,7 @@
-/* 砚台 · 叙事记忆核心确定性引擎（v0.4.0 · 分卷封存防失忆 & 轻量模型自愈解析） */
+/* 砚台 · 叙事记忆核心确定性引擎（v0.4.1 · 分卷封存防失忆 & 轻量模型自愈解析） */
 const JDMCore = (() => {
   'use strict';
-  const VERSION = '0.4.0';
+  const VERSION = '0.4.1';
   const DEFAULT_CHAPTER_SPAN = 24;
   const TENSIONS = ['平稳', '轻松', '紧张', '焦灼', '冲突', '缓和', '未明'];
   const KINDS = ['未完成事项', '约定', '誓言', '任务', '案件', '线索', '悬念'];

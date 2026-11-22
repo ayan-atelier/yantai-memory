@@ -6,17 +6,25 @@ export function installEntries({ id, label, glyph, order, open, host, extraActio
   const owned = new Set();
   function closeNativeMenu() {
     const menu = document.getElementById('options');
-    if (menu && getComputedStyle(menu).display !== 'none') document.getElementById('options_button')?.click();
+    if (menu && getComputedStyle(menu).display !== 'none') {
+      document.getElementById('options_button')?.click();
+    }
   }
   function entryClick(e) {
     e.preventDefault(); e.stopImmediatePropagation(); closeNativeMenu(); open();
   }
   function mount() {
     if (dead) return;
+    // Ensure legacy wand entry is removed if previously mounted; keep ONLY in ☰ (#options)
+    const legacyWandItem = document.querySelector(`#extensionsMenu #${id}-menu`);
+    if (legacyWandItem) legacyWandItem.remove();
     const parent = document.querySelector('#options .options-content');
     if (parent && !document.getElementById(id + '-menu')) {
-      const entry = node('a', undefined, 'yt-native-entry interactable'); entry.id = id + '-menu'; entry.dataset.order = String(order);
-      entry.role = 'button'; entry.tabIndex = 0;
+      const entry = node('a', undefined, 'yt-native-entry interactable');
+      entry.id = id + '-menu';
+      entry.dataset.order = String(order);
+      entry.role = 'button';
+      entry.tabIndex = 0;
       entry.addEventListener('click', entryClick);
       entry.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); entry.click(); } });
       const icon = node('i', undefined, 'fa-lg fa-solid ' + glyph); icon.setAttribute('aria-hidden', 'true');
